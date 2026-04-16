@@ -1,0 +1,14 @@
+{
+  "name": "walletverify-bot",
+  "version": "1.0.0",
+  "private": true,
+  "main": "watcher.js",
+  "scripts": {
+    "start": "node watcher.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.103.0",
+    "dotenv": "^16.4.7",
+    "ethers": "^6.16.0"
+  }
+}
