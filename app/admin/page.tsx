@@ -141,13 +141,17 @@ export default function AdminPage() {
     setAuthLoading(true);
     setAuthError(false);
 
-    const res = await fetch("/api/wallets", {
-      headers: { "x-admin-key": password },
-    });
+    try {
+      const res = await fetch("/api/auth/verify", {
+        headers: { "x-admin-key": password },
+      });
 
-    if (res.ok) {
-      setAdminKey(password);
-    } else {
+      if (res.ok) {
+        setAdminKey(password);
+      } else {
+        setAuthError(true);
+      }
+    } catch (err) {
       setAuthError(true);
     }
     setAuthLoading(false);
