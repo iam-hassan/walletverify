@@ -178,11 +178,15 @@ export default function AdminPage() {
   const [authError, setAuthError] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<Tab>("wallets");
+  const [isHydrated, setIsHydrated] = useState(false);
 
-  // Restore session from sessionStorage on mount
+  // Restore session immediately on mount (before render)
   useEffect(() => {
-    const saved = sessionStorage.getItem("admin_key");
-    if (saved) setAdminKey(saved);
+    const saved = typeof window !== "undefined" ? sessionStorage.getItem("admin_key") : null;
+    if (saved) {
+      setAdminKey(saved);
+    }
+    setIsHydrated(true);
   }, []);
 
   async function handleLogin(e: React.FormEvent) {
@@ -210,6 +214,15 @@ export default function AdminPage() {
   function handleLogout() {
     sessionStorage.removeItem("admin_key");
     setAdminKey(null);
+  }
+
+  // Show loading state while hydrating from session storage
+  if (!isHydrated) {
+    return (
+      <div className="min-h-screen bg-[#0d0d0d] flex items-center justify-center">
+        <Loader2 className="h-8 w-8 text-white animate-spin" />
+      </div>
+    );
   }
 
   if (!adminKey) {
