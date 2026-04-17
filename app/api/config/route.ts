@@ -1,13 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase";
-
-function isAuthorized(req: NextRequest) {
-  return req.headers.get("x-admin-key") === process.env.ADMIN_PASSWORD;
-}
+import { isAdminAuthorized } from "@/lib/auth";
 
 // GET /api/config — fetch all config key-value pairs
 export async function GET(req: NextRequest) {
-  if (!isAuthorized(req)) {
+  if (!(await isAdminAuthorized(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -28,7 +25,7 @@ export async function GET(req: NextRequest) {
 
 // PUT /api/config — update one or more config values
 export async function PUT(req: NextRequest) {
-  if (!isAuthorized(req)) {
+  if (!(await isAdminAuthorized(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

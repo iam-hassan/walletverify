@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase";
+import { isAdminAuthorized } from "@/lib/auth";
 
 // PATCH /api/wallets/[id] — toggle wallet approval status (Approved ↔ Revoked)
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const adminKey = req.headers.get("x-admin-key");
-  if (adminKey !== process.env.ADMIN_PASSWORD) {
+  if (!(await isAdminAuthorized(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

@@ -1,15 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getAdminPassword } from "@/lib/auth";
 
-// GET /api/auth/verify — verify admin password (simple auth check)
+// GET /api/auth/verify — verify admin password
 export async function GET(req: NextRequest) {
   const adminKey = req.headers.get("x-admin-key");
-  const expectedPassword = process.env.ADMIN_PASSWORD;
+  const expectedPassword = await getAdminPassword();
 
   if (!expectedPassword) {
-    return NextResponse.json(
-      { error: "Admin password not configured" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Admin password not configured" }, { status: 500 });
   }
 
   if (adminKey === expectedPassword) {

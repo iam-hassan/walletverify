@@ -310,7 +310,15 @@ export default function AdminPage() {
 
       {/* Tab Content */}
       {activeTab === "wallets" && <WalletTable adminKey={adminKey} />}
-      {activeTab === "config" && <ConfigPanel adminKey={adminKey} />}
+      {activeTab === "config" && (
+        <ConfigPanel
+          adminKey={adminKey}
+          onPasswordChanged={(newPwd) => {
+            sessionStorage.setItem("admin_key", newPwd);
+            setAdminKey(newPwd);
+          }}
+        />
+      )}
       {activeTab === "transactions" && <TransactionsTab adminKey={adminKey} />}
     </div>
   );

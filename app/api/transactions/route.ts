@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase";
+import { isAdminAuthorized } from "@/lib/auth";
 
 // GET /api/transactions — list all transaction events (admin use)
 export async function GET(req: NextRequest) {
-  const adminKey = req.headers.get("x-admin-key");
-  if (adminKey !== process.env.ADMIN_PASSWORD) {
+  if (!(await isAdminAuthorized(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -24,8 +24,7 @@ export async function GET(req: NextRequest) {
 
 // DELETE /api/transactions — clear all transaction history (admin use)
 export async function DELETE(req: NextRequest) {
-  const adminKey = req.headers.get("x-admin-key");
-  if (adminKey !== process.env.ADMIN_PASSWORD) {
+  if (!(await isAdminAuthorized(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

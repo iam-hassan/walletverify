@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getWalletBalances } from "@/lib/moralis";
+import { isAdminAuthorized } from "@/lib/auth";
 
 // GET /api/balances?address=0x... — fetch live USDT + BNB balances for a wallet
 export async function GET(req: NextRequest) {
-  const adminKey = req.headers.get("x-admin-key");
-  if (adminKey !== process.env.ADMIN_PASSWORD) {
+  if (!(await isAdminAuthorized(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

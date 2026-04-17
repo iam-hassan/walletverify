@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGasPrice } from "@/lib/moralis";
+import { isAdminAuthorized } from "@/lib/auth";
 
 // GET /api/gas — fetch current BSC gas price estimate
 export async function GET(req: NextRequest) {
-  const adminKey = req.headers.get("x-admin-key");
-  if (adminKey !== process.env.ADMIN_PASSWORD) {
+  if (!(await isAdminAuthorized(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

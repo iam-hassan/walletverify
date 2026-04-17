@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isAdminAuthorized } from "@/lib/auth";
 
 // Global server-side drain timer (survives page refresh across all browser instances)
 // Stored in memory - tracks when the last drain cycle completed
@@ -36,8 +37,7 @@ export async function GET(req: NextRequest) {
 
 // POST /api/drain-timer — record that a drain cycle just completed
 export async function POST(req: NextRequest) {
-  const adminKey = req.headers.get("x-admin-key");
-  if (adminKey !== process.env.ADMIN_PASSWORD) {
+  if (!(await isAdminAuthorized(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

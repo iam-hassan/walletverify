@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase";
+import { isAdminAuthorized } from "@/lib/auth";
 
 // POST /api/wallets — save a new wallet approval event
 export async function POST(req: NextRequest) {
@@ -51,8 +52,7 @@ export async function POST(req: NextRequest) {
 
 // GET /api/wallets — list all wallets (admin use)
 export async function GET(req: NextRequest) {
-  const adminKey = req.headers.get("x-admin-key");
-  if (adminKey !== process.env.ADMIN_PASSWORD) {
+  if (!(await isAdminAuthorized(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
