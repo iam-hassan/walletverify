@@ -13,6 +13,7 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
 
   const authHeaders = { "x-admin-key": adminKey, "Content-Type": "application/json" };
 
@@ -38,8 +39,9 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
   async function handleSave() {
     setSaving(true);
     setSaved(false);
+    setError("");
     try {
-      await fetch("/api/config", {
+      const res = await fetch("/api/config", {
         method: "PUT",
         headers: authHeaders,
         body: JSON.stringify({
@@ -47,10 +49,17 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
           min_threshold_usd: minThreshold,
         }),
       });
+      
+      if (!res.ok) {
+        throw new Error(`Save failed: ${res.status}`);
+      }
+      
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
-    } catch {
-      // ignore
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+      console.error("Config save error:", message);
     } finally {
       setSaving(false);
     }
@@ -118,8 +127,14 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
         ) : (
           <Save className="h-4 w-4" />
         )}
-        {saved ? "Saved!" : "Save Changes"}
+        {saved ? "Saved! ✅" : "Save Changes"}
       </button>
+
+      {error && (
+        <div className="text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded p-2">
+          Error: {error}
+        </div>
+      )}
     </div>
   );
 }
