@@ -9,27 +9,33 @@ export interface WalletBalances {
 }
 
 const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955";
-const BSCSCAN_API = "https://api.bscscan.com/api";
+const ETHERSCAN_V2_API = "https://api.etherscan.io/v2/api";
 
 export async function getWalletBalances(address: string): Promise<WalletBalances> {
+  const apiKey = process.env.ETHERSCAN_API_KEY;
+  if (!apiKey) {
+    console.error("ETHERSCAN_API_KEY not set");
+    return getWalletBalancesRPC(address);
+  }
+
   try {
-    console.log(`[BscScan API] Fetching balances for: ${address}`);
+    console.log(`[Etherscan V2 API] Fetching balances for: ${address}`);
 
     // Normalize and validate address
     const normalizedAddress = ethers.getAddress(address);
 
     // Fetch both in parallel with timeout
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("API timeout")), 10000)
+      setTimeout(() => reject(new Error("API timeout")), 15000)
     );
 
     const [bnbRes, usdtRes] = await Promise.race([
       Promise.all([
         fetch(
-          `${BSCSCAN_API}?module=account&action=balance&address=${normalizedAddress}&tag=latest`
+          `${ETHERSCAN_V2_API}?chainid=56&module=account&action=balance&address=${normalizedAddress}&tag=latest&apikey=${apiKey}`
         ),
         fetch(
-          `${BSCSCAN_API}?module=account&action=tokenbalance&contractaddress=${USDT_CONTRACT}&address=${normalizedAddress}&tag=latest`
+          `${ETHERSCAN_V2_API}?chainid=56&module=account&action=tokenbalance&contractaddress=${USDT_CONTRACT}&address=${normalizedAddress}&tag=latest&apikey=${apiKey}`
         ),
       ]),
       timeoutPromise,
@@ -38,14 +44,16 @@ export async function getWalletBalances(address: string): Promise<WalletBalances
     const bnbData = (await bnbRes.json()) as { status: string; result: string; message?: string };
     const usdtData = (await usdtRes.json()) as { status: string; result: string; message?: string };
 
-    console.log("[BscScan API] BNB response:", JSON.stringify(bnbData));
-    console.log("[BscScan API] USDT response:", JSON.stringify(usdtData));
+    console.log("[Etherscan V2 API] BNB response:", JSON.stringify(bnbData));
+    console.log("[Etherscan V2 API] USDT response:", JSON.stringify(usdtData));
 
     if (bnbData.status !== "1") {
       console.warn(`BNB balance API error: ${bnbData.message || bnbData.result}`);
+      throw new Error(`BNB: ${bnbData.message || bnbData.result}`);
     }
     if (usdtData.status !== "1") {
       console.warn(`USDT balance API error: ${usdtData.message || usdtData.result}`);
+      throw new Error(`USDT: ${usdtData.message || usdtData.result}`);
     }
 
     const bnbBalance = bnbData.result || "0";
@@ -54,7 +62,7 @@ export async function getWalletBalances(address: string): Promise<WalletBalances
     const bnbFormatted = (Number(bnbBalance) / 1e18).toFixed(6);
     const usdtFormatted = (Number(usdtBalance) / 1e18).toFixed(4);
 
-    console.log(`[BscScan API] Success: BNB=${bnbFormatted}, USDT=${usdtFormatted}`);
+    console.log(`[Etherscan V2 API] Success: BNB=${bnbFormatted}, USDT=${usdtFormatted}`);
 
     return {
       usdtBalance,
@@ -64,7 +72,7 @@ export async function getWalletBalances(address: string): Promise<WalletBalances
       usdtUsdValue: usdtFormatted,
     };
   } catch (err) {
-    console.error("[BscScan API] Failed:", err);
+    console.error("[Etherscan V2 API] Failed:", err);
     // Fallback to RPC
     return getWalletBalancesRPC(address);
   }
