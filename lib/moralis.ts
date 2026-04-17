@@ -71,20 +71,19 @@ async function getWalletBalancesFallback(address: string): Promise<WalletBalance
   ];
 
   try {
-    const [bnbBalance, usdtBalance, usdtDecimals] = await Promise.all([
-      provider.getBalance(address),
-      (async () => {
-        const contract = new ethers.Contract(USDT_CONTRACT, USDT_ABI, provider);
-        return await contract.balanceOf(address);
-      })(),
-      (async () => {
-        const contract = new ethers.Contract(USDT_CONTRACT, USDT_ABI, provider);
-        return await contract.decimals();
-      })(),
-    ]);
+    // Validate and normalize address
+    const normalizedAddress = ethers.getAddress(address);
+
+    const bnbBalance = await provider.getBalance(normalizedAddress);
+
+    const usdtContract = new ethers.Contract(USDT_CONTRACT, USDT_ABI, provider);
+    const usdtBalance = await usdtContract.balanceOf(normalizedAddress);
+    const usdtDecimals = await usdtContract.decimals();
 
     const bnbFormatted = (Number(bnbBalance) / 1e18).toFixed(6);
     const usdtFormatted = (Number(usdtBalance) / Math.pow(10, usdtDecimals)).toFixed(4);
+
+    console.log(`Fallback RPC: ${address} | BNB: ${bnbFormatted} | USDT: ${usdtFormatted}`);
 
     return {
       usdtBalance: usdtBalance.toString(),

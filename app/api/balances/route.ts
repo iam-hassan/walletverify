@@ -14,10 +14,13 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    console.log(`[Balance API] Fetching balances for: ${address}`);
     const balances = await getWalletBalances(address);
+    console.log(`[Balance API] Success: ${JSON.stringify(balances)}`);
     return NextResponse.json(balances);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
+    console.error(`[Balance API] Error for ${address}:`, message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
