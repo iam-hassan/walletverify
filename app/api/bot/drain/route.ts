@@ -121,14 +121,16 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Record this drain cycle time globally so all browser instances sync to it
+  // Update the persistent next-drain timestamp in Supabase
   try {
-    await fetch(`${process.env.VERCEL_URL || "http://localhost:3000"}/api/drain-timer`, {
+    const { getAdminPassword } = await import("@/lib/auth");
+    const pwd = await getAdminPassword();
+    await fetch(`${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/api/drain-timer`, {
       method: "POST",
-      headers: { "x-admin-key": process.env.ADMIN_PASSWORD || "" },
+      headers: { "x-admin-key": pwd || "" },
     });
   } catch {
-    // Ignore timer sync errors
+    // Non-critical — timer will re-sync on next client poll
   }
 
   return NextResponse.json({ success: true, results });

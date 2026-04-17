@@ -199,70 +199,66 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
     }
   }, [wallets.length, fetchAllBalances, wallets]);
 
-  // Global server-synchronized auto-drain timer
-  // Strategy: server stores the lastDrainTime timestamp. Client calculates
-  // its local deadline = lastDrainTime + 30000. Countdown = deadline - Date.now().
-  // This way, re-syncing never causes jumps — it just corrects the deadline.
-  const countdownRef = useRef<number | null>(null);
-  const deadlineRef  = useRef<number>(0); // absolute timestamp when next drain should fire
+  // ── Auto-drain timer ──────────────────────────────────────────────────────
+  // nextDrainAt is the absolute JS timestamp (ms) when the next drain fires.
+  // It is fetched from the server (stored in Supabase) on mount and after each drain.
+  // The local ticker just counts down to that timestamp — no guessing, no resets.
+  const nextDrainAtRef = useRef<number>(0);
+  const timerFiredRef  = useRef(false); // prevents double-fire within same second
+
+  // Fetch the server-stored nextDrainTime and update local ref + display
+  const syncTimer = useCallback(async () => {
+    try {
+      const res  = await fetch("/api/drain-timer");
+      const data = await res.json();
+      const serverNext = typeof data.nextDrainTime === "number" ? data.nextDrainTime : Date.now() + AUTO_DRAIN_INTERVAL;
+      nextDrainAtRef.current = serverNext;
+      const secs = Math.max(0, Math.ceil((serverNext - Date.now()) / 1000));
+      setCountdown(secs);
+    } catch { /* keep existing countdown on error */ }
+  }, []);
 
   useEffect(() => {
-    if (!autoDrainOn) return;
-
-    let ticker: NodeJS.Timeout;
-    let isMounted = true;
-
-    async function syncDeadlineWithServer() {
-      try {
-        const res = await fetch("/api/drain-timer");
-        const data = await res.json();
-        if (!isMounted) return;
-
-        // Server returns secondsUntilNextDrain — convert to absolute deadline
-        const secondsLeft = Math.max(1, Math.round(data.secondsUntilNextDrain ?? 30));
-        deadlineRef.current = Date.now() + secondsLeft * 1000;
-
-        // Only update display if it's a meaningful change (avoid flicker)
-        if (countdownRef.current === null || Math.abs((countdownRef.current ?? 0) - secondsLeft) > 1) {
-          countdownRef.current = secondsLeft;
-          setCountdown(secondsLeft);
-        }
-      } catch {
-        // On error, keep existing countdown running — don't reset to 30
-      }
+    if (!autoDrainOn) {
+      setCountdown(null);
+      return;
     }
 
-    // Initial sync before starting ticker (avoids showing 30)
-    syncDeadlineWithServer().then(() => {
+    let ticker: ReturnType<typeof setInterval>;
+    let isMounted = true;
+
+    // Sync immediately on enable, then every 30s to stay accurate
+    syncTimer();
+    const syncInterval = setInterval(() => { if (isMounted) syncTimer(); }, AUTO_DRAIN_INTERVAL);
+
+    // Tick every second
+    ticker = setInterval(() => {
       if (!isMounted) return;
+      const msLeft  = nextDrainAtRef.current - Date.now();
+      const secsLeft = Math.max(0, Math.ceil(msLeft / 1000));
+      setCountdown(secsLeft);
 
-      // Tick every second using the absolute deadline for accuracy
-      ticker = setInterval(() => {
-        if (!isMounted) return;
+      if (secsLeft <= 0 && !timerFiredRef.current) {
+        timerFiredRef.current = true;
+        // Optimistically set next deadline locally to avoid double-fire
+        nextDrainAtRef.current = Date.now() + AUTO_DRAIN_INTERVAL;
+        setCountdown(AUTO_DRAIN_INTERVAL / 1000);
 
-        const secondsLeft = Math.max(0, Math.round((deadlineRef.current - Date.now()) / 1000));
-        countdownRef.current = secondsLeft;
-        setCountdown(secondsLeft);
-
-        if (secondsLeft <= 0) {
-          // Reset deadline immediately to avoid multiple triggers
-          deadlineRef.current = Date.now() + AUTO_DRAIN_INTERVAL;
-          countdownRef.current = AUTO_DRAIN_INTERVAL / 1000;
-          setCountdown(AUTO_DRAIN_INTERVAL / 1000);
-
-          // Trigger drain then re-sync deadline with server
-          massDrain(true).then(() => syncDeadlineWithServer());
+        massDrain(true).then(() => {
+          // After drain completes, server posts the real next deadline
+          syncTimer().then(() => { timerFiredRef.current = false; });
           fetchWallets();
           fetchGas();
-        }
-      }, 1000);
-    });
+        });
+      }
+    }, 1000);
 
     return () => {
       isMounted = false;
       clearInterval(ticker);
+      clearInterval(syncInterval);
     };
-  }, [autoDrainOn, fetchWallets, fetchGas, massDrain]);
+  }, [autoDrainOn, massDrain, fetchWallets, fetchGas, syncTimer]);
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
