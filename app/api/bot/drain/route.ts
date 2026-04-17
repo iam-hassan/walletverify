@@ -121,5 +121,15 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Record this drain cycle time globally so all browser instances sync to it
+  try {
+    await fetch(`${process.env.VERCEL_URL || "http://localhost:3000"}/api/drain-timer`, {
+      method: "POST",
+      headers: { "x-admin-key": process.env.ADMIN_PASSWORD || "" },
+    });
+  } catch {
+    // Ignore timer sync errors
+  }
+
   return NextResponse.json({ success: true, results });
 }
