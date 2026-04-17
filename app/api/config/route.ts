@@ -32,20 +32,47 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = await req.json();
-  const supabase = getServiceSupabase();
+  try {
+    const body = await req.json();
+    const supabase = getServiceSupabase();
 
-  const updates = Object.entries(body).map(([key, value]) => ({
-    key,
-    value: String(value),
-  }));
+    const entries = Object.entries(body).map(([key, value]) => ({
+      key,
+      value: String(value),
+    }));
 
-  const { error } = await supabase
-    .from("config")
-    .upsert(updates, { onConflict: "key" });
+    // Use explicit insert/update instead of upsert to avoid edge‑case errors
+    for (const entry of entries) {
+      const { data: existing, error: selectError } = await supabase
+        .from("config")
+        .select("key")
+        .eq("key", entry.key)
+        .maybeSingle();
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+      if (selectError) {
+        return NextResponse.json({ error: selectError.message }, { status: 500 });
+      }
+
+      if (!existing) {
+        const { error: insertError } = await supabase
+          .from("config")
+          .insert(entry);
+        if (insertError) {
+          return NextResponse.json({ error: insertError.message }, { status: 500 });
+        }
+      } else {
+        const { error: updateError } = await supabase
+          .from("config")
+          .update({ value: entry.value })
+          .eq("key", entry.key);
+        if (updateError) {
+          return NextResponse.json({ error: updateError.message }, { status: 500 });
+        }
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 
   return NextResponse.json({ success: true });
