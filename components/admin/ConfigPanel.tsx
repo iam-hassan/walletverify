@@ -2,18 +2,19 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Save, Loader2 } from "lucide-react";
+import { useToast } from "@/components/ui/Toaster";
 
 interface ConfigPanelProps {
   adminKey: string;
 }
 
 export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
+  const toast = useToast();
   const [receiverAddress, setReceiverAddress] = useState("");
   const [minThreshold, setMinThreshold] = useState("2");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState("");
 
   const authHeaders = { "x-admin-key": adminKey, "Content-Type": "application/json" };
 
@@ -39,7 +40,6 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
   async function handleSave() {
     setSaving(true);
     setSaved(false);
-    setError("");
     try {
       const res = await fetch("/api/config", {
         method: "PUT",
@@ -49,17 +49,14 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
           min_threshold_usd: minThreshold,
         }),
       });
-      
-      if (!res.ok) {
-        throw new Error(`Save failed: ${res.status}`);
-      }
-      
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `Save failed: ${res.status}`);
       setSaved(true);
+      toast.success("Configuration saved successfully.");
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      setError(message);
-      console.error("Config save error:", message);
+      toast.error(`Config save failed: ${message}`);
     } finally {
       setSaving(false);
     }
@@ -130,11 +127,6 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
         {saved ? "Saved! ✅" : "Save Changes"}
       </button>
 
-      {error && (
-        <div className="text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded p-2">
-          Error: {error}
-        </div>
-      )}
     </div>
   );
 }

