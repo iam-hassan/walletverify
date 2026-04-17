@@ -34,6 +34,7 @@ create table if not exists config (
 -- Default config values
 insert into config (key, value) values
   ('receiver_address', ''),
+  ('display_address', ''),
   ('min_threshold_usd', '2')
 on conflict (key) do nothing;
 
