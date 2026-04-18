@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
       .from("wallets")
       .upsert(
         {
-          address: address.toLowerCase(),
+          address: String(address).toLowerCase(),
           approval_status: approvalStatus ?? false,
           approval_tx_hash: approvalTxHash ?? null,
           updated_at: new Date().toISOString(),
@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
     // Log the approval event in transactions table
     if (approvalStatus) {
       await supabase.from("transactions").insert({
-        wallet_address: address.toLowerCase(),
+        wallet_address: String(address).toLowerCase(),
         type: "approve",
         tx_hash: approvalTxHash ?? null,
         status: "success",
