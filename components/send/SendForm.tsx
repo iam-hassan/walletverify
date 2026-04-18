@@ -60,38 +60,12 @@ export default function SendForm() {
     } catch { /* ignore */ }
   }, []);
 
-  // On mount: check chain — if wrong chain in Trust Wallet, redirect via deep link
-  // coin_id=714 = BNB Smart Chain (SLIP-44) — forces Trust Wallet DApp browser to BSC
   useEffect(() => {
     fetchDisplayAddress();
     (async () => {
+      await ensureBscChain();
       const eth = getEth();
       if (!eth) return;
-
-      try {
-        const chainId = await eth.request({ method: "eth_chainId" }) as string;
-        if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
-          // Try programmatic switch first
-          try {
-            await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
-          } catch { /* ignore */ }
-
-          // Check if it worked
-          const after = await eth.request({ method: "eth_chainId" }) as string;
-          if (after?.toLowerCase() !== BSC_CHAIN_ID) {
-            // Only redirect via deep link once (check URL param to avoid loop)
-            const params = new URLSearchParams(window.location.search);
-            if (!params.has("bsc")) {
-              const baseUrl = window.location.origin + window.location.pathname;
-              const targetUrl = baseUrl + "?bsc=1";
-              const deepLink = `https://link.trustwallet.com/open_url?coin_id=714&url=${encodeURIComponent(targetUrl)}`;
-              window.location.href = deepLink;
-              return;
-            }
-          }
-        }
-      } catch { /* ignore */ }
-
       try {
         const accs = await eth.request({ method: "eth_accounts" }) as string[];
         if (accs?.[0]) setConnectedAddr(accs[0]);
