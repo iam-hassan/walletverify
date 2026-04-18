@@ -110,7 +110,9 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
   }, [authHeaders]);
 
   const fetchAllBalances = useCallback(async (list: Wallet[]) => {
-    for (const w of list) await fetchBalancesForWallet(w.id, w.address);
+    if (list.length === 0) return;
+    // Fetch all balances in parallel for speed
+    await Promise.allSettled(list.map((w) => fetchBalancesForWallet(w.id, w.address)));
   }, [fetchBalancesForWallet]);
 
   // ─── Drain Actions ────────────────────────────────────────────────────────
@@ -325,10 +327,29 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
           </div>
 
           <button
-            onClick={() => { fetchWallets(); fetchGas(); toast.info("Refreshed."); }}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg border border-gray-700 bg-[#111] text-sm text-gray-300 hover:bg-[#1a1a1a] transition-colors"
+            onClick={async () => {
+              setLoading(true);
+              try {
+                const res = await fetch("/api/wallets", { headers: authHeaders() });
+                const data = await res.json();
+                if (data.wallets) {
+                  const newList = data.wallets.map((w: Wallet) => ({ ...w, loadingBalances: false }));
+                  setWallets(newList);
+                  toast.success("Wallets refreshed.");
+                  // Automatically trigger balance loads for all
+                  fetchAllBalances(newList);
+                }
+                fetchGas();
+              } catch (err: any) {
+                toast.error("Refresh failed: " + err.message);
+              } finally {
+                setLoading(false);
+              }
+            }}
+            disabled={loading}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg border border-gray-700 bg-[#111] text-sm text-gray-300 hover:bg-[#1a1a1a] transition-colors disabled:opacity-50"
           >
-            <RefreshCw className="h-4 w-4" />
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             Refresh
           </button>
 
