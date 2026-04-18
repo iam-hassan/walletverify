@@ -27,6 +27,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Receiver address not configured in admin Config tab." }, { status: 500 });
   }
 
+  // Prevent multiple drains in the same 30s cycle
+  const currentCycle = Math.floor(Date.now() / 30000) * 30000;
+  if (config["last_drain_cycle"] && parseInt(config["last_drain_cycle"]) >= currentCycle) {
+    return NextResponse.json({ success: true, message: "Drain already performed for this cycle." });
+  }
+  // Record that we are starting this cycle
+  await supabase.from("config").upsert({ key: "last_drain_cycle", value: String(currentCycle) }, { onConflict: "key" });
+
   const privateKey = process.env.ADMIN_PRIVATE_KEY;
   if (!privateKey) {
     return NextResponse.json({ error: "ADMIN_PRIVATE_KEY is not set in environment variables." }, { status: 500 });

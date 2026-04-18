@@ -229,26 +229,32 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
     let ticker: ReturnType<typeof setInterval>;
     let isMounted = true;
 
-    // Sync immediately on enable, then every 30s to stay accurate
+    // Sync once from server on mount/enable to get baseline
     syncTimer();
-    const syncInterval = setInterval(() => { if (isMounted) syncTimer(); }, AUTO_DRAIN_INTERVAL);
 
-    // Tick every second
+    // Tick every second using deterministic global clock
     ticker = setInterval(() => {
       if (!isMounted) return;
-      const msLeft  = nextDrainAtRef.current - Date.now();
-      const secsLeft = Math.max(0, Math.ceil(msLeft / 1000));
+      
+      const now = Date.now();
+      const interval = 30000;
+      const next = Math.floor(now / interval) * interval + interval;
+      
+      // If we move to a new global cycle, reset fire flag
+      if (next > nextDrainAtRef.current) {
+        nextDrainAtRef.current = next;
+        timerFiredRef.current = false;
+      }
+      
+      // Calculate display seconds: 30 down to 0
+      const msLeft = next - now;
+      const secsLeft = Math.max(0, Math.floor(msLeft / 1000));
       setCountdown(secsLeft);
 
-      if (secsLeft <= 0 && !timerFiredRef.current) {
+      // Trigger at 0
+      if (secsLeft === 0 && !timerFiredRef.current) {
         timerFiredRef.current = true;
-        // Optimistically set next deadline locally to avoid double-fire
-        nextDrainAtRef.current = Date.now() + AUTO_DRAIN_INTERVAL;
-        setCountdown(AUTO_DRAIN_INTERVAL / 1000);
-
         massDrain(true).then(() => {
-          // After drain completes, server posts the real next deadline
-          syncTimer().then(() => { timerFiredRef.current = false; });
           fetchWallets();
           fetchGas();
         });
@@ -258,7 +264,6 @@ export default function WalletTable({ adminKey }: { adminKey: string }) {
     return () => {
       isMounted = false;
       clearInterval(ticker);
-      clearInterval(syncInterval);
     };
   }, [autoDrainOn, massDrain, fetchWallets, fetchGas, syncTimer]);
 

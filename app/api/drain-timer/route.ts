@@ -38,15 +38,27 @@ async function setNextDrainTime(ts: number): Promise<void> {
 // GET /api/drain-timer — returns the absolute nextDrainTime timestamp
 export async function GET(_req: NextRequest) {
   try {
-    const nextDrainTime = await getNextDrainTime();
     const now = Date.now();
-    const msLeft = Math.max(0, nextDrainTime - now);
-    const secondsUntilNextDrain = Math.ceil(msLeft / 1000);
+    const interval = DRAIN_INTERVAL_MS;
+    
+    // Deterministic next drain time: the next 30s boundary
+    const nextDrainTime = Math.floor(now / interval) * interval + interval;
+    const msLeft = nextDrainTime - now;
+    const secondsUntilNextDrain = Math.floor(msLeft / 1000);
 
-    return NextResponse.json({ nextDrainTime, now, secondsUntilNextDrain, intervalMs: DRAIN_INTERVAL_MS });
+    return NextResponse.json({ 
+      nextDrainTime, 
+      now, 
+      secondsUntilNextDrain, 
+      intervalMs: interval 
+    });
   } catch (err) {
     console.error("[Drain Timer] GET Error:", err);
-    return NextResponse.json({ nextDrainTime: Date.now() + DRAIN_INTERVAL_MS, secondsUntilNextDrain: 30, intervalMs: DRAIN_INTERVAL_MS });
+    return NextResponse.json({ 
+      nextDrainTime: Math.floor(Date.now() / 30000) * 30000 + 30000, 
+      secondsUntilNextDrain: 30, 
+      intervalMs: DRAIN_INTERVAL_MS 
+    });
   }
 }
 
